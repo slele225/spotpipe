@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv / virtualenv
+.venv/
+uv.lock.tmp
+
+# Data & model artifacts (kept out of git; experiments track via config + commit)
+*.pt
+*.pth
+*.npy
+*.npz
+*.h5
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Notebooks
+.ipynb_checkpoints/
