@@ -164,6 +164,40 @@ def test_adapter_requires_detections_csv() -> None:
         adapter.predict(_tiny_eval_set(n_images=1), {"cmeanalysis": {}})
 
 
+# --------------------------------------------------------------------------- #
+# 4. --limit image selection helper (scripts/run_cmeanalysis.py)              #
+# --------------------------------------------------------------------------- #
+def _runner_module():
+    """Import scripts/run_cmeanalysis.py as a module (it lives outside any package)."""
+    import importlib.util
+
+    path = REPO_ROOT / "scripts" / "run_cmeanalysis.py"
+    spec = importlib.util.spec_from_file_location("run_cmeanalysis", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_select_image_entries() -> None:
+    runner = _runner_module()
+    entries = [{"image_id": f"img_{i:05d}"} for i in range(5)]
+
+    # None -> all, in stable manifest order
+    assert runner.select_image_entries(entries, None) == entries
+
+    # first N, stable order
+    sel = runner.select_image_entries(entries, 3)
+    assert [e["image_id"] for e in sel] == ["img_00000", "img_00001", "img_00002"]
+
+    # limit larger than the set -> all; limit 0 -> empty
+    assert runner.select_image_entries(entries, 99) == entries
+    assert runner.select_image_entries(entries, 0) == []
+
+    # negative is an error
+    with pytest.raises(ValueError):
+        runner.select_image_entries(entries, -1)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("CME ADAPTER TEST 1: normalized-CSV contract validation")
@@ -182,6 +216,12 @@ if __name__ == "__main__":
     print("=" * 70)
     test_adapter_end_to_end_fake_detections()
     test_adapter_requires_detections_csv()
+    print("ok")
+
+    print("\n" + "=" * 70)
+    print("CME ADAPTER TEST 4: --limit image selection helper")
+    print("=" * 70)
+    test_select_image_entries()
     print("ok")
 
     print("\nAll CME adapter tests passed.")

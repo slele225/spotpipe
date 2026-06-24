@@ -79,13 +79,32 @@ def _validate_csv(path: Path) -> int:
     return len(df)
 
 
-def _layout_condition_folder(frozen_dir: Path, work_dir: Path, detect_channel: int) -> tuple[Path, str, str]:
+def select_image_entries(entries: list[dict], limit: int | None) -> list[dict]:
+    """First ``limit`` manifest image entries, in manifest order (stable).
+
+    Mirrors ``harness.load_frozen_benchmark_set``'s slicing exactly so the smoke
+    subset prepared here matches what the benchmark will then load: ``limit=None``
+    keeps all images; otherwise keep ``entries[:limit]``. Order is the manifest
+    order (same as the frozen-set loader / metadata). Negative ``limit`` is an error.
+    """
+    if limit is None:
+        return list(entries)
+    if int(limit) < 0:
+        raise ValueError(f"--limit must be >= 0; got {limit}")
+    return list(entries[: int(limit)])
+
+
+def _layout_condition_folder(
+    frozen_dir: Path, work_dir: Path, detect_channel: int, limit: int | None = None,
+) -> tuple[Path, str, str]:
     """Build a clean 2-channel condition folder from the frozen RAW TIFFs.
 
     Layout (what loadConditionData expects): ``<cond>/<image_id>/ch1/<id>.tif`` and
     ``<cond>/<image_id>/ch2/<id>.tif``. The master channel is whichever the
     ``detect_channel`` selects; both raw channels are copied verbatim (no 3-page
-    convention, no photometric changes). Returns (cond_dir, master_name, slave_name).
+    convention, no photometric changes). When ``limit`` is set, only the first N
+    images (manifest order) are prepared -- for a tiny CME smoke run without
+    touching the full frozen set. Returns (cond_dir, master_name, slave_name).
     """
     with open(frozen_dir / "manifest.json", "r", encoding="utf-8") as fh:
         manifest = json.load(fh)
@@ -95,16 +114,20 @@ def _layout_condition_folder(frozen_dir: Path, work_dir: Path, detect_channel: i
     cond = work_dir / "condition"
     cond.mkdir(parents=True, exist_ok=True)
 
-    n = 0
-    for entry in manifest["images"]:
+    entries = select_image_entries(manifest["images"], limit)
+    image_ids = [str(e["image_id"]) for e in entries]
+    scope = f"--limit {limit}" if limit is not None else "full set"
+    print(f"[layout] selected {len(image_ids)} of {len(manifest['images'])} image(s) ({scope}).")
+    print(f"[layout] image_ids: {image_ids}")
+
+    for entry in entries:
         image_id = str(entry["image_id"])
         for ch_key, ch_name in (("ch1_raw", "ch1"), ("ch2_raw", "ch2")):
             src = frozen_dir / entry[ch_key]
             dst_dir = cond / image_id / ch_name
             dst_dir.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst_dir / f"{image_id}.tif")
-        n += 1
-    print(f"[layout] wrote a {n}-image 2-channel condition folder to {cond} "
+    print(f"[layout] wrote a {len(image_ids)}-image 2-channel condition folder to {cond} "
           f"(master={master}, slave={slave})")
     return cond, master, slave
 
@@ -164,6 +187,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="scratch dir for the condition folder (default: <out>/../cme_work)")
     p.add_argument("--detect-channel", type=int, choices=[1, 2], default=2,
                    help="CME master/detect channel")
+    p.add_argument("--limit", type=int, default=None,
+                   help="external_matlab: prepare/detect only the first N frozen images "
+                        "(manifest order) for a tiny smoke run; omit for the full set")
 
     # external MATLAB wrapper location (OUTSIDE the repo and the CME source tree)
     p.add_argument("--cme-software-folder", default=None, help="CMEAnalysis source folder")
@@ -200,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
     frozen_dir = Path(args.frozen_dir)
     out_csv = Path(args.out)
     work_dir = Path(args.work_dir) if args.work_dir else out_csv.parent / "cme_work"
-    cond, master, slave = _layout_condition_folder(frozen_dir, work_dir, args.detect_channel)
+    cond, master, slave = _layout_condition_folder(
+        frozen_dir, work_dir, args.detect_channel, limit=args.limit,
+    )
     return _run_matlab(args, cond, master, slave, out_csv)
 
 
