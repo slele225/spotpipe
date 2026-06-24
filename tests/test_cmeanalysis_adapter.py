@@ -198,6 +198,60 @@ def test_select_image_entries() -> None:
         runner.select_image_entries(entries, -1)
 
 
+def test_make_batches() -> None:
+    runner = _runner_module()
+    entries = [{"image_id": f"img_{i:05d}"} for i in range(139)]
+
+    # exact batch sizes: 139 -> 64 + 64 + 11 (the recommended --batch-size 64)
+    b = runner.make_batches(entries, 64)
+    assert [len(x) for x in b] == [64, 64, 11]
+
+    # stable order + exact image_ids preserved (no renaming, no reordering)
+    assert b[0][0]["image_id"] == "img_00000"
+    assert b[0][-1]["image_id"] == "img_00063"
+    assert b[1][0]["image_id"] == "img_00064"
+    assert b[2][-1]["image_id"] == "img_00138"
+    assert [e for batch in b for e in batch] == entries  # flatten round-trips
+
+    # limit + batch_size interaction: select first 100, then batch by 64 -> 64 + 36
+    sel = runner.select_image_entries(entries, 100)
+    b2 = runner.make_batches(sel, 64)
+    assert [len(x) for x in b2] == [64, 36]
+    assert b2[-1][-1]["image_id"] == "img_00099"
+
+    # even division
+    assert [len(x) for x in runner.make_batches(entries[:128], 64)] == [64, 64]
+
+    # empty -> no batches; invalid sizes -> error
+    assert runner.make_batches([], 64) == []
+    with pytest.raises(ValueError):
+        runner.make_batches(entries, 0)
+    with pytest.raises(ValueError):
+        runner.make_batches(entries, -3)
+    with pytest.raises(ValueError):
+        runner.make_batches(entries, None)
+
+
+def test_diag_sweep_parsers() -> None:
+    runner = _runner_module()
+
+    # sweep-limit spec parsing ('full'/'all'/'none' -> None)
+    assert runner._parse_sweep_limits("4,8,16,32,64,full") == [4, 8, 16, 32, 64, None]
+    assert runner._parse_sweep_limits(" 2 , full , 5 ") == [2, None, 5]
+
+    # sigma line parsing: takes the last printed value; flags NaN
+    ok_txt = "noise\nGaussian PSF s.d. values:  1.40 1.40\nRunning detection ..."
+    sigma, ok = runner._parse_sigma(ok_txt)
+    assert sigma == "1.40 1.40" and ok is True
+
+    nan_txt = "Gaussian PSF s.d. values:  NaN NaN\n"
+    sigma, ok = runner._parse_sigma(nan_txt)
+    assert "NaN" in sigma and ok is False
+
+    sigma, ok = runner._parse_sigma("no sigma line here")
+    assert sigma == "(not printed)" and ok is False
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("CME ADAPTER TEST 1: normalized-CSV contract validation")
@@ -222,6 +276,8 @@ if __name__ == "__main__":
     print("CME ADAPTER TEST 4: --limit image selection helper")
     print("=" * 70)
     test_select_image_entries()
+    test_make_batches()
+    test_diag_sweep_parsers()
     print("ok")
 
     print("\nAll CME adapter tests passed.")

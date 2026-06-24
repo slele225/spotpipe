@@ -139,6 +139,28 @@ uv run python scripts/run_cmeanalysis.py \
 > silently baked in — the runner logs the exact values used on every run. Known
 > approximate imaging values: NA ≈ 1.49, sample pixel size ≈ 0.07 µm.
 
+**Full frozen set: run in batches (recommended).** CMEAnalysis auto-estimates the
+PSF sigma by sampling `nf = round(40/nd)` frames per movie; for a large condition
+folder (`nd` ≈ 139) this rounds to **0**, so sigma becomes `NaN` and detection
+aborts. Run in stable-order batches so each batch auto-estimates sigma independently
+(per-batch CSVs are concatenated into `--out`, preserving `image_id`):
+
+```bash
+uv run python scripts/run_cmeanalysis.py \
+  --input-format external_matlab \
+  --frozen-dir data/benchmark_test_v1 \
+  --batch-size 64 \
+  --detect-channel 2 \
+  --cme-software-folder "C:/Users/shivl/OneDrive/Desktop/matlab/cme analysis stuff/cmeAnalysis-master/software" \
+  --matlab-wrapper-folder "C:/Users/shivl/OneDrive/Desktop/matlab/cme analysis stuff/spotpipe_external" \
+  --matlab-entrypoint spotpipe_cme_detect \
+  --na 1.49 --magnification 108 --pixel-size-m 6.5e-6 \
+  --out data/benchmark_test_v1/cme_detections/detections.csv
+```
+
+`--batch-size 64` splits the 139-image set into 64 + 64 + 11. To diagnose the
+sigma boundary directly, use `--input-format diagnose_sigma --sweep-limits 4,8,16,32,64,full`.
+
 Run the benchmark with the CME method (on the frozen set):
 
 ```bash
