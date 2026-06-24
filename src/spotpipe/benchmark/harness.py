@@ -210,6 +210,25 @@ def default_benchmark_config() -> dict:
             "bg_outer_px": 7.0,
             "use_photon_images": True,
         },
+        "spotiflow": {
+            # Spotiflow (external detector) + aperture photometry. Detections reach
+            # us as a normalized CSV per model variant (image_id,x,y,... produced by
+            # scripts/run_spotiflow_predict.py); canonical I1/I2 come from aperture +
+            # annulus photometry on the PHOTON images, never from Spotiflow itself.
+            "detect_image": "raw_max",     # raw detector image fed to Spotiflow
+            "window_radius_px": 3.0,       # aperture radius (mirrors the aperture baseline)
+            "bg_inner_px": 5.0,            # local-background annulus inner radius (px)
+            "bg_outer_px": 8.0,            # local-background annulus outer radius (px)
+            "general": {
+                "detections_csv": None,    # normalized detections CSV (general model)
+                "model_variant": "general",
+            },
+            "finetuned_spotpipe_synth": {
+                "detections_csv": None,    # normalized detections CSV (fine-tuned model)
+                "model_variant": "finetuned_spotpipe_synth",
+                "model_dir": "external_models/spotiflow_finetuned_spotpipe_synth",
+            },
+        },
         "uncertainty": {"n_sigma_bins": 8},
         "adc_max": 4095.0,
     }

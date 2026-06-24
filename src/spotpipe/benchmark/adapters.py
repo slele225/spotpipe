@@ -238,9 +238,47 @@ class ExternalPlaceholderAdapter(_ExternalStub):
 
 
 # --------------------------------------------------------------------------- #
+# Lazy factories for the Spotiflow + aperture methods                          #
+# --------------------------------------------------------------------------- #
+# The two honest Spotiflow methods share one adapter
+# (:class:`spotpipe.benchmark.spotiflow.SpotiflowPlusApertureAdapter`). It is
+# registered through these factory functions, lazily importing the spotiflow
+# module so (a) there is no import cycle (the spotiflow module imports `Adapter`
+# from here) and (b) `import spotpipe.benchmark.adapters` never pulls in the
+# external `spotiflow` package (the in-repo adapter module does not import it
+# either; only scripts/run_spotiflow_predict.py does). These are distinct from
+# the legacy `spotiflow` stub above, which has the wrong (per-channel-divide)
+# contract and is NOT used for the new methods.
+def _spotiflow_general_adapter(**kwargs) -> Adapter:
+    from spotpipe.benchmark.spotiflow import (
+        SPOTIFLOW_METHOD_GENERAL,
+        SpotiflowPlusApertureAdapter,
+    )
+
+    return SpotiflowPlusApertureAdapter(
+        method_name=SPOTIFLOW_METHOD_GENERAL, model_variant="general", **kwargs
+    )
+
+
+def _spotiflow_finetuned_adapter(**kwargs) -> Adapter:
+    from spotpipe.benchmark.spotiflow import (
+        SPOTIFLOW_METHOD_FINETUNED,
+        SpotiflowPlusApertureAdapter,
+    )
+
+    return SpotiflowPlusApertureAdapter(
+        method_name=SPOTIFLOW_METHOD_FINETUNED,
+        model_variant="finetuned_spotpipe_synth",
+        **kwargs,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Registry                                                                     #
 # --------------------------------------------------------------------------- #
-ADAPTER_REGISTRY: dict[str, type[Adapter]] = {
+# Values are constructors: an Adapter subclass, or a factory returning one (the
+# Spotiflow methods). `get_adapter` calls the value with kwargs either way.
+ADAPTER_REGISTRY: dict[str, object] = {
     OurModelAdapter.name: OurModelAdapter,
     ClassicalPerChannelApertureAdapter.name: ClassicalPerChannelApertureAdapter,
     OracleCenterApertureDivideAdapter.name: OracleCenterApertureDivideAdapter,
@@ -248,6 +286,8 @@ ADAPTER_REGISTRY: dict[str, type[Adapter]] = {
     DecodeAdapter.name: DecodeAdapter,
     SpotiflowAdapter.name: SpotiflowAdapter,
     ExternalPlaceholderAdapter.name: ExternalPlaceholderAdapter,
+    "spotiflow_general_plus_aperture": _spotiflow_general_adapter,
+    "spotiflow_finetuned_spotpipe_synth_plus_aperture": _spotiflow_finetuned_adapter,
 }
 
 # Backward-compatible aliases for the pre-rename method names. Deprecated: they

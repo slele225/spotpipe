@@ -61,6 +61,32 @@ benchmark:
     bg_outer_px: 7.0             # local-background annulus outer radius (px)
     use_photon_images: true
 
+  # --- Spotiflow (external detector) + aperture photometry -------------------
+  # Two OPT-IN methods (not in `methods` above): enable via
+  #   --methods spotiflow_general_plus_aperture
+  #   --methods spotiflow_finetuned_spotpipe_synth_plus_aperture
+  # Spotiflow is an EXTERNAL detector run in its own .venvs/spotiflow env; it
+  # never enters the spotpipe import graph. Its detections reach the harness only
+  # as the normalized CSV below (image_id,x,y,p_detect,source,model_variant,
+  # detect_image), produced by scripts/run_spotiflow_predict.py from the RAW
+  # detector image (raw_max). Spotiflow is detector/localizer ONLY -- canonical
+  # I1/I2 come from aperture+annulus photometry on the PHOTON images (same
+  # estimator as the aperture baseline), never from Spotiflow heatmaps.
+  spotiflow:
+    detect_image: raw_max         # pixelwise max(ch1_raw, ch2_raw) fed to Spotiflow
+    window_radius_px: 3           # aperture radius (mirrors the aperture baseline)
+    bg_inner_px: 5                # local-background annulus inner radius (px)
+    bg_outer_px: 8                # local-background annulus outer radius (px)
+
+    general:
+      detections_csv: outputs/external/spotiflow/general_raw_max/detections.csv
+      model_variant: general
+
+    finetuned_spotpipe_synth:
+      detections_csv: outputs/external/spotiflow/finetuned_spotpipe_synth_raw_max/detections.csv
+      model_variant: finetuned_spotpipe_synth
+      model_dir: external_models/spotiflow_finetuned_spotpipe_synth
+
   # --- uncertainty calibration (our model only) ---
   uncertainty:
     n_sigma_bins: 8              # quantile bins for the predicted-sigma curve
