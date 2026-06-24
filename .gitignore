@@ -20,6 +20,13 @@ uv.lock.tmp
 # Generated simulator outputs (figures, datasets) live here; reproduce from config
 /outputs/
 
+# External-tool artifacts (Spotiflow/DECODE/...): generated detections, results,
+# fine-tuned model folders, and per-tool venvs are produced/installed locally and
+# reproduced from code+config -- never committed.
+external_models/
+outputs/external/
+.venvs/
+
 # Per-experiment outputs (figures, metrics, checkpoints): reproduce from config + commit
 experiments/*/outputs/
 
