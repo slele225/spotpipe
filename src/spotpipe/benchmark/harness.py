@@ -43,6 +43,7 @@ from spotpipe.simulator.generate_dataset import _git_commit
 __all__ = [
     "EvalImage",
     "load_eval_set",
+    "load_frozen_benchmark_set",
     "build_eval_set",
     "run_benchmark",
     "default_benchmark_config",
@@ -58,12 +59,21 @@ DEFAULT_METHODS = ["our_model", "classical_per_channel_aperture", "oracle_center
 # --------------------------------------------------------------------------- #
 @dataclass
 class EvalImage:
-    """One held-out image: raw counts, ground-truth schema table, metadata."""
+    """One held-out image: raw counts, ground-truth schema table, metadata.
+
+    ``photon`` is an OPTIONAL pre-attached two-channel photon-proportional image
+    (``[2, H, W]``); the frozen-set loader attaches the real
+    ``images_ch{1,2}_photon`` TIFFs here so adapters that extract intensity from
+    photon images (e.g. ``cmeanalysis_plus_aperture``) use them directly. It is
+    ``None`` for in-memory eval sets, where such adapters derive it from the raw
+    counts + detector meta instead.
+    """
 
     image_id: str
     image: np.ndarray          # [2, H, W]
     meta: dict
     gt: pd.DataFrame           # canonical schema, ground-truth rows
+    photon: np.ndarray | None = None   # optional [2, H, W] photon-proportional image
 
 
 def load_eval_set(eval_dir: str | Path) -> list[EvalImage]:
@@ -79,6 +89,57 @@ def load_eval_set(eval_dir: str | Path) -> list[EvalImage]:
         with open(eval_dir / entry["meta_file"], "r", encoding="utf-8") as fh:
             meta = json.load(fh)
         items.append(EvalImage(image_id=entry["image_id"], image=image, meta=meta, gt=gt))
+    return items
+
+
+def load_frozen_benchmark_set(
+    frozen_dir: str | Path,
+    *,
+    limit: int | None = None,
+    with_photon: bool = True,
+) -> list[EvalImage]:
+    """Load the FROZEN benchmark/test set (``benchmark_set`` layout) as EvalImages.
+
+    The frozen set differs from the ``generate_dataset`` layout that
+    :func:`load_eval_set` reads: images are plain ``images/<id>.npy`` (uint16
+    ``[2,H,W]`` raw counts), ground truth is a single ``ground_truth.csv`` (split
+    here by ``image_id``), and per-channel photon TIFFs live in
+    ``images_ch{1,2}_photon/``. When ``with_photon`` is set those photon images are
+    attached to each :class:`EvalImage` so adapters extract intensity from the real
+    photon-proportional images (the fair-photometry rule). Detection/localization
+    still uses the raw ``image``; this loader never reads ``audit/``.
+
+    ``limit`` keeps only the first N images (for smoke runs).
+    """
+    frozen_dir = Path(frozen_dir)
+    with open(frozen_dir / "manifest.json", "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+
+    gt_all = pd.read_csv(frozen_dir / "ground_truth.csv")
+    gt_all["image_id"] = gt_all["image_id"].astype(str)
+    gt_by_image = {str(k): v.reset_index(drop=True) for k, v in gt_all.groupby("image_id")}
+
+    entries = manifest["images"]
+    if limit is not None:
+        entries = entries[: int(limit)]
+
+    items: list[EvalImage] = []
+    for entry in entries:
+        image_id = str(entry["image_id"])
+        image = np.load(frozen_dir / entry["image_file"])
+        with open(frozen_dir / entry["meta_file"], "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        gt = gt_by_image.get(image_id, pd.DataFrame(columns=SCHEMA_COLUMNS))
+
+        photon = None
+        if with_photon and entry.get("ch1_photon") and entry.get("ch2_photon"):
+            import tifffile
+
+            p1 = tifffile.imread(frozen_dir / entry["ch1_photon"])
+            p2 = tifffile.imread(frozen_dir / entry["ch2_photon"])
+            photon = np.stack([p1, p2], axis=0).astype(float)
+
+        items.append(EvalImage(image_id=image_id, image=image, meta=meta, gt=gt, photon=photon))
     return items
 
 
@@ -140,6 +201,15 @@ def default_benchmark_config() -> dict:
             "min_separation_px": 2.0,
         },
         "our_model": {"peak_threshold": 0.3, "nms_kernel": 3, "max_spots": 2000},
+        "cmeanalysis": {
+            "detections_csv": None,        # normalized CME detections CSV (image_id,x,y,...)
+            "detect_channel": 2,           # CME master channel (layout/provenance only)
+            "p_detect_source": "constant", # constant | A | score | one_minus_pval | neg_log10_pval
+            "window_radius_px": 3.0,       # aperture radius (mirrors the aperture baseline)
+            "bg_inner_px": 4.0,
+            "bg_outer_px": 7.0,
+            "use_photon_images": True,
+        },
         "uncertainty": {"n_sigma_bins": 8},
         "adc_max": 4095.0,
     }
@@ -504,12 +574,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the synthetic spot-detection benchmark.")
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--eval-dir", help="existing eval set (generate_dataset layout)")
+    src.add_argument("--frozen-dir", help="frozen benchmark/test set (benchmark_set layout)")
     src.add_argument("--simulator-config", help="simulator YAML; build a fresh in-memory eval set")
     parser.add_argument("--config", default=str(REPO_ROOT / "configs" / "benchmark.yaml"))
     parser.add_argument("--out", required=True, help="output directory")
     parser.add_argument("--methods", default=None, help="comma-separated method list (overrides config)")
     parser.add_argument("--checkpoint", default=None, help="our-model checkpoint (.pt) for the our_model method")
     parser.add_argument("--n-images", type=int, default=8, help="images to build with --simulator-config")
+    parser.add_argument("--limit", type=int, default=None, help="keep only the first N images (--frozen-dir)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
@@ -519,6 +591,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.eval_dir:
         eval_set = load_eval_set(args.eval_dir)
+    elif args.frozen_dir:
+        eval_set = load_frozen_benchmark_set(args.frozen_dir, limit=args.limit)
     else:
         sim_cfg = _load_yaml(args.simulator_config)
         eval_set = build_eval_set(sim_cfg, n_images=args.n_images, seed=args.seed)

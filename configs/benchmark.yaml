@@ -44,6 +44,23 @@ benchmark:
     logvar_min: -10.0            # derived-uncertainty clamp (matches the NLL)
     logvar_max: 6.0
 
+  # --- CMEAnalysis (external detector) + aperture photometry -----------------
+  # cmeanalysis_plus_aperture is OPT-IN (not in `methods` above): enable it via
+  # --methods cmeanalysis_plus_aperture. CMEAnalysis is a LOCAL, EXTERNAL MATLAB
+  # package (never vendored); its detections reach us only as the normalized CSV
+  # below (image_id,x,y + optional score/A/slave_A/channel/native_I1/native_I2;
+  # produce it with scripts/run_cmeanalysis.py). CME is detector/localizer ONLY --
+  # canonical I1/I2 come from aperture+annulus photometry on the PHOTON images
+  # (same estimator as the aperture baseline), never from CME native amplitudes.
+  cmeanalysis:
+    detections_csv: data/benchmark_test_v1/cme_detections/detections.csv
+    detect_channel: 2             # CME master channel (layout/provenance only)
+    p_detect_source: constant     # constant | A | score | one_minus_pval | neg_log10_pval
+    window_radius_px: 3.0         # aperture radius (mirrors the aperture baseline)
+    bg_inner_px: 4.0              # local-background annulus inner radius (px)
+    bg_outer_px: 7.0             # local-background annulus outer radius (px)
+    use_photon_images: true
+
   # --- uncertainty calibration (our model only) ---
   uncertainty:
     n_sigma_bins: 8              # quantile bins for the predicted-sigma curve

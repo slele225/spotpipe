@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from spotpipe.benchmark import baselines
@@ -36,6 +37,7 @@ __all__ = [
     "OurModelAdapter",
     "ClassicalPerChannelApertureAdapter",
     "OracleCenterApertureDivideAdapter",
+    "CmeAnalysisPlusApertureAdapter",
     "DecodeAdapter",
     "SpotiflowAdapter",
     "ExternalPlaceholderAdapter",
@@ -126,6 +128,73 @@ class OracleCenterApertureDivideAdapter(Adapter):
         return self._concat(frames)
 
 
+class CmeAnalysisPlusApertureAdapter(Adapter):
+    """CMEAnalysis (external detector) + in-repo aperture photometry.
+
+    CMEAnalysis is a LOCAL, EXTERNAL MATLAB package -- never vendored here. Its
+    detections reach us only as a normalized CSV (``image_id, x, y`` + optional
+    columns; see :mod:`spotpipe.benchmark.cmeanalysis`). This adapter reads that
+    CSV (``config['cmeanalysis']['detections_csv']``), then extracts canonical
+    ``I1`` / ``I2`` by aperture + annulus photometry on the **photon** images at
+    the CME centres -- CME's native amplitudes are NOT used as intensities.
+
+    Photometry uses each item's photon image when the loader attached one
+    (``item.photon``, e.g. the frozen set's ``images_ch{1,2}_photon`` TIFFs);
+    otherwise it derives the photon image from the raw counts and the known
+    per-channel offset/gain in ``item.meta`` -- the same linear correction the
+    frozen set records (``photon_k = (raw - offset_k) / gain_k``).
+    """
+
+    name = "cmeanalysis_plus_aperture"
+
+    def predict(self, eval_set, config: dict) -> pd.DataFrame:
+        from spotpipe.benchmark import cmeanalysis
+
+        ccfg = config.get("cmeanalysis", {})
+        det_path = ccfg.get("detections_csv")
+        if not det_path:
+            raise ValueError(
+                "cmeanalysis_plus_aperture requires "
+                "config['cmeanalysis']['detections_csv'] (the normalized CME "
+                "detections CSV); see scripts/run_cmeanalysis.py to produce it."
+            )
+        det = cmeanalysis.load_normalized_detections(det_path)
+        by_image = {str(k): v for k, v in det.groupby("image_id")}
+
+        frames = []
+        for item in eval_set:
+            sub = by_image.get(str(item.image_id))
+            if sub is None or len(sub) == 0:
+                continue
+            photon = self._photon_for(item)
+            frames.append(
+                cmeanalysis.cme_plus_aperture(photon, sub, image_id=item.image_id, cfg=ccfg)
+            )
+        return self._concat(frames)
+
+    @staticmethod
+    def _photon_for(item) -> np.ndarray:
+        """Return the ``[2, H, W]`` photon image for an eval item.
+
+        Prefers an attached ``item.photon`` (real photon TIFFs); falls back to the
+        documented linear correction ``(raw - offset_k) / gain_k`` from the raw
+        counts + detector meta when none is attached (e.g. in-memory eval sets).
+        """
+        photon = getattr(item, "photon", None)
+        if photon is not None:
+            return np.asarray(photon, dtype=float)
+        image = np.asarray(item.image, dtype=float)
+        det = item.meta.get("detector", {})
+        o1 = float(det.get("ch1", {}).get("offset", 0.0))
+        g1 = float(det.get("ch1", {}).get("gain", 1.0))
+        o2 = float(det.get("ch2", {}).get("offset", 0.0))
+        g2 = float(det.get("ch2", {}).get("gain", 1.0))
+        out = np.empty_like(image, dtype=float)
+        out[0] = (image[0] - o1) / max(g1, 1e-6)
+        out[1] = (image[1] - o2) / max(g2, 1e-6)
+        return out
+
+
 # --------------------------------------------------------------------------- #
 # Stubbed external tools (filled in once installed)                            #
 # --------------------------------------------------------------------------- #
@@ -175,6 +244,7 @@ ADAPTER_REGISTRY: dict[str, type[Adapter]] = {
     OurModelAdapter.name: OurModelAdapter,
     ClassicalPerChannelApertureAdapter.name: ClassicalPerChannelApertureAdapter,
     OracleCenterApertureDivideAdapter.name: OracleCenterApertureDivideAdapter,
+    CmeAnalysisPlusApertureAdapter.name: CmeAnalysisPlusApertureAdapter,
     DecodeAdapter.name: DecodeAdapter,
     SpotiflowAdapter.name: SpotiflowAdapter,
     ExternalPlaceholderAdapter.name: ExternalPlaceholderAdapter,
