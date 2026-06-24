@@ -88,12 +88,16 @@ benchmark:
       model_dir: external_models/spotiflow_finetuned_spotpipe_synth
 
   # --- SpotMAX (external detector) + aperture photometry ---------------------
-  # OPT-IN method (not in `methods` above): enable via
-  #   --methods spotmax_ai_plus_aperture
+  # Two OPT-IN methods (not in `methods` above) share this one block; they differ
+  # ONLY in how SpotMAX was configured to detect (carried honestly in the name +
+  # flags), never in the in-repo photometry. Enable via:
+  #   --methods spotmax_ai_plus_aperture          (SpotMAX "spotMAX AI" detector)
+  #   --methods spotmax_threshold_plus_aperture   (Thresholding + peak_local_max)
   # SpotMAX (Cell-ACDC) is run HEADLESS in its own env (`spotmax -p config.ini`);
   # it never enters the spotpipe import graph. Its output tables (0_detected_spots
   # / 1_valid_spots / 2_spotfit) are parsed into a neutral CSV (image_id,x,y,
-  # p_detect,native_*) by scripts/convert_spotmax_output.py. SpotMAX is detector/
+  # p_detect,native_*) by scripts/convert_spotmax_output.py (or, for the full set
+  # in memory-bounded batches, scripts/run_spotmax_batches.py). SpotMAX is detector/
   # localizer ONLY -- canonical I1/I2 come from aperture+annulus photometry on the
   # PHOTON images (same estimator as the aperture baseline), never from SpotMAX
   # native intensities. detect_image=raw_max (pixelwise max of the two raw channels).
@@ -104,6 +108,31 @@ benchmark:
     window_radius_px: 3.0         # aperture radius (mirrors the aperture baseline)
     bg_inner_px: 5.0              # local-background annulus inner radius (px)
     bg_outer_px: 8.0              # local-background annulus outer radius (px)
+
+  # --- v0_hrnet (LEGACY, model-native intensities) ---------------------------
+  # OPT-IN (not in `methods` above): enable via --methods v0_hrnet. An OLD HRNet
+  # archived in a SEPARATE repo (liposome-detect/models/hrnet_v1) -- labelled v0
+  # honestly: trained long ago on a DIFFERENT forward model with DIFFERENT channel
+  # semantics (lipid/protein) + normalization, NOT on spotpipe's simulator. Unlike
+  # the *_plus_aperture detector-only methods, it PREDICTS intensities AND per-spot
+  # uncertainties directly, so there is NO aperture step and no photon image is read.
+  # It is run in its OWN torch/timm env (nothing in spotpipe imports torch/timm or
+  # the legacy repo); its predictions reach the harness only as the canonical CSV
+  # below, produced by scripts/run_v0_hrnet_predict.py.
+  #
+  # UNITS CAVEAT: the legacy I1/I2 are in the OLD simulator's flux units, not
+  # spotpipe photon-proportional units (carried as units=legacy_flux in flags), so
+  # absolute-intensity bias is expected to be large/meaningless; detection metrics
+  # and the log-ratio SLOPE stay meaningful (a per-channel scale shifts the ratio
+  # intercept, not the slope). ch1_channel records which legacy channel maps to
+  # spotpipe ch1/logI1 (the rest is just provenance for run_v0_hrnet_predict.py).
+  v0_hrnet:
+    predictions_csv: outputs/external/v0_hrnet/predictions.csv
+    ch1_channel: lipid            # which legacy channel -> spotpipe ch1/logI1 (lipid|protein)
+    # Provenance for the producing script (not read by the harness adapter):
+    legacy_repo: C:\Users\shivl\Music\liposome-detect
+    legacy_config: C:\Users\shivl\Music\liposome-detect\configs\train\hrnet_v1.yaml
+    checkpoint: C:\Users\shivl\Music\liposome-detect\models\hrnet_v1\best.pt
 
   # --- uncertainty calibration (our model only) ---
   uncertainty:

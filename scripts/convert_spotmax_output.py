@@ -33,11 +33,9 @@ Typical run::
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 # Editable install puts spotpipe on the path; this fallback keeps the script
@@ -59,25 +57,6 @@ def _load_id_map(run_dir: Path) -> dict[str, str]:
     return {str(r["position"]): str(r["image_id"]) for _, r in df.iterrows()}
 
 
-def _photon_for_images(bench: Path, image_ids) -> dict[str, np.ndarray]:
-    """Load the ``[2,H,W]`` photon image for each needed image_id (fair photometry)."""
-    import tifffile
-
-    with open(bench / "manifest.json", "r", encoding="utf-8") as fh:
-        manifest = json.load(fh)
-    by_id = {str(e["image_id"]): e for e in manifest["images"]}
-    wanted = set(map(str, image_ids))
-    out: dict[str, np.ndarray] = {}
-    for image_id in sorted(wanted):
-        entry = by_id.get(image_id)
-        if entry is None:
-            continue
-        p1 = tifffile.imread(bench / entry["ch1_photon"])
-        p2 = tifffile.imread(bench / entry["ch2_photon"])
-        out[image_id] = np.stack([p1, p2], axis=0).astype(float)
-    return out
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Convert SpotMAX output -> canonical predictions.")
     parser.add_argument("--spotmax-run", required=True, help="run dir (holds id_map.csv + SpotMAX_output/)")
@@ -85,6 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="canonical predictions CSV path")
     parser.add_argument("--neutral-out", default=None,
                         help="neutral detections CSV path (default: <out dir>/neutral_detections.csv)")
+    parser.add_argument("--method", default=smx.SPOTMAX_METHOD_AI, choices=list(smx.SPOTMAX_METHODS),
+                        help="honest method name carried into flags (AI vs threshold detector)")
     parser.add_argument("--x-col", default=None, help="override SpotMAX x (column) source column")
     parser.add_argument("--y-col", default=None, help="override SpotMAX y (row) source column")
     parser.add_argument("--p-col", default=None, help="override SpotMAX p_detect source column")
@@ -111,7 +92,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[convert] found {len(tables)} SpotMAX output table(s):")
     for pos, tbl in sorted(tables.items()):
         cols = list(smx._read_table(tbl).columns)
-        print(f"          {pos}: {tbl.name}  columns={cols}")
+        xcol, ycol = smx.resolve_xy_columns(cols, x_col=args.x_col, y_col=args.y_col)
+        pcol = smx.resolve_p_detect_column(cols, p_col=args.p_col)
+        preview = cols[:12] + (["..."] if len(cols) > 12 else [])
+        print(f"          {pos}: {tbl.name}  ({len(cols)} cols) "
+              f"x={xcol} y={ycol} p_detect={pcol or 'NaN'}  {preview}")
 
     neutral = smx.parse_spotmax_output(
         run_dir, id_map, x_col=args.x_col, y_col=args.y_col, p_col=args.p_col,
@@ -130,7 +115,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # 2. Aperture/annulus photometry on the PHOTON images -> canonical schema.
-    photon_by_image = _photon_for_images(bench, neutral["image_id"].unique())
     cfg = {
         "detect_image": args.detect_image,
         "nonpositive": args.nonpositive,
@@ -138,30 +122,20 @@ def main(argv: list[str] | None = None) -> int:
         "bg_inner_px": args.bg_inner_px,
         "bg_outer_px": args.bg_outer_px,
     }
-    total = {"n_in": 0, "n_out": 0, "n_nonpositive": 0}
-    frames = []
-    for image_id, sub in neutral.groupby("image_id"):
-        photon = photon_by_image.get(str(image_id))
-        if photon is None:
-            print(f"[convert] WARNING: no photon image for {image_id}; skipping its {len(sub)} detection(s)")
-            continue
-        df, stats = smx.spotmax_plus_aperture(photon, sub, image_id=str(image_id), cfg=cfg)
-        for k in total:
-            total[k] += stats[k]
-        frames.append(df)
-
-    pred = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=list(SCHEMA_COLUMNS))
+    pred, total = smx.neutral_to_canonical(neutral, bench, cfg=cfg, method_name=args.method)
     write_spots(pred, args.out)
 
+    if total["n_missing_image"]:
+        print(f"[convert] WARNING: {total['n_missing_image']} detection(s) had no photon image (skipped)")
     print(
-        f"[convert] photometry: {total['n_in']} detections in -> {total['n_out']} emitted "
-        f"({total['n_nonpositive']} non-positive, policy={args.nonpositive})"
+        f"[convert] photometry ({args.method}): {total['n_in']} detections in -> "
+        f"{total['n_out']} emitted ({total['n_nonpositive']} non-positive, policy={args.nonpositive})"
     )
     print(f"[convert] wrote canonical predictions: {args.out} ({len(pred)} rows)")
     print(
         "[convert] benchmark with:\n"
         f"           uv run python scripts/run_benchmark.py --frozen-dir {bench} "
-        f"--limit {len(id_map)} --methods spotmax_ai_plus_aperture "
+        f"--limit {len(id_map)} --methods {args.method} "
         f"--config <yaml with spotmax.detections_csv={neutral_out}> --out {run_dir / 'benchmark'}"
     )
     return 0

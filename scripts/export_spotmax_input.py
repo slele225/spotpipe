@@ -46,44 +46,16 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 # Editable install puts spotpipe on the path; this fallback keeps the script
 # runnable from a fresh checkout too (no sys.path hacks for shared code).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-# Endname (suffix before the extension) of the detection channel file. The INI's
-# spots-channel endname must match this. Single source of truth.
-SPOTS_ENDNAME = "spots"
+from spotpipe.benchmark import spotmax as smx
 
-
-def build_detect_image(ch1: np.ndarray, ch2: np.ndarray, detect_image: str) -> np.ndarray:
-    """Collapse the two raw channels into the single 2-D image SpotMAX detects on.
-
-    ``raw_max`` (default + recommended first protocol) is the pixelwise max so a
-    spot bright in EITHER channel can be found. Other protocols are wired for
-    later ablations. Output is float32 (SpotMAX reads standard image dtypes).
-    """
-    a = np.asarray(ch1, dtype=np.float32)
-    b = np.asarray(ch2, dtype=np.float32)
-    if detect_image == "raw_max":
-        return np.maximum(a, b)
-    if detect_image == "raw_sum":
-        return a + b
-    if detect_image == "master_ch1":
-        return a
-    if detect_image == "master_ch2":
-        return b
-    raise ValueError(
-        f"unknown --detect-image {detect_image!r}; supported: "
-        "raw_max | raw_sum | master_ch1 | master_ch2"
-    )
-
-
-def _position_name(index: int) -> str:
-    """1-based SpotMAX Position folder name (``Position_000001`` ...)."""
-    return f"Position_{index + 1:06d}"
+# Endname of the detection channel TIFF; the INI's spots-channel endname must match.
+SPOTS_ENDNAME = smx.SPOTS_ENDNAME
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -95,12 +67,9 @@ def main(argv: list[str] | None = None) -> int:
                         choices=["raw_max", "raw_sum", "master_ch1", "master_ch2"])
     args = parser.parse_args(argv)
 
-    import tifffile
-
     bench = Path(args.benchmark)
     out = Path(args.out)
     input_root = out / "input"
-    input_root.mkdir(parents=True, exist_ok=True)
 
     with open(bench / "manifest.json", "r", encoding="utf-8") as fh:
         manifest = json.load(fh)
@@ -109,30 +78,10 @@ def main(argv: list[str] | None = None) -> int:
         print("[export] no images to export (empty manifest / n-images=0)")
         return 1
 
-    id_rows: list[dict] = []
-    for i, entry in enumerate(entries):
-        image_id = str(entry["image_id"])
-        position = _position_name(i)
-        ch1 = tifffile.imread(bench / entry["ch1_raw"])
-        ch2 = tifffile.imread(bench / entry["ch2_raw"])
-        detect = build_detect_image(ch1, ch2, args.detect_image)
-
-        images_dir = input_root / position / "Images"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        tif_path = images_dir / f"{position}_{SPOTS_ENDNAME}.tif"
-        tifffile.imwrite(tif_path, detect.astype(np.float32))
-
-        id_rows.append({
-            "position": position,
-            "image_id": image_id,
-            "detect_image": args.detect_image,
-            "spots_tif": str(tif_path.relative_to(out)),
-            "src_ch1_raw": entry["ch1_raw"],
-            "src_ch2_raw": entry["ch2_raw"],
-            "height": int(detect.shape[0]),
-            "width": int(detect.shape[1]),
-        })
-        print(f"[export] {position} <- {image_id}: wrote {tif_path.name} {detect.shape}")
+    id_rows = smx.export_positions(bench, entries, input_root, args.detect_image)
+    for row in id_rows:
+        print(f"[export] {row['position']} <- {row['image_id']}: "
+              f"wrote {Path(row['spots_tif']).name} ({row['height']}, {row['width']})")
 
     id_map_path = out / "id_map.csv"
     pd.DataFrame(id_rows).to_csv(id_map_path, index=False)

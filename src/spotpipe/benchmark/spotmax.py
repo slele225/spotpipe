@@ -64,6 +64,10 @@ from spotpipe.schema import SpotRecord, records_to_dataframe
 
 __all__ = [
     "SPOTMAX_METHOD",
+    "SPOTMAX_METHOD_AI",
+    "SPOTMAX_METHOD_THRESHOLD",
+    "SPOTMAX_METHODS",
+    "SPOTS_ENDNAME",
     "REQUIRED_COLUMNS",
     "OPTIONAL_COLUMNS",
     "NEUTRAL_COLUMNS",
@@ -76,11 +80,33 @@ __all__ = [
     "find_spotmax_tables",
     "parse_spotmax_output",
     "load_normalized_spotmax_detections",
+    "merge_neutral_detections",
     "spotmax_plus_aperture",
+    "neutral_to_canonical",
+    "load_photon_images",
+    "build_detect_image",
+    "position_name",
+    "export_positions",
+    "rewrite_ini_folder_path",
     "SpotmaxPlusApertureAdapter",
 ]
 
-SPOTMAX_METHOD = "spotmax_ai_plus_aperture"
+# Two HONEST method names share one adapter -- they differ ONLY in how SpotMAX was
+# configured to detect (the SpotMAX INI), never in the in-repo photometry:
+#   * spotmax_ai_plus_aperture        -- SpotMAX "spotMAX AI" detector.
+#   * spotmax_threshold_plus_aperture -- SpotMAX Thresholding + peak_local_max
+#                                        (the classical, non-AI detector path).
+# Both then use the SAME aperture+annulus photometry on the photon images. The
+# method name is carried into `flags` so the detector used is never ambiguous.
+SPOTMAX_METHOD_AI = "spotmax_ai_plus_aperture"
+SPOTMAX_METHOD_THRESHOLD = "spotmax_threshold_plus_aperture"
+SPOTMAX_METHODS: tuple[str, ...] = (SPOTMAX_METHOD_AI, SPOTMAX_METHOD_THRESHOLD)
+SPOTMAX_METHOD = SPOTMAX_METHOD_AI  # back-compat default
+
+# Endname (suffix before the extension) of the exported detection-channel TIFF.
+# The SpotMAX INI's spots-channel endname must match this. Single source of truth
+# shared by the exporter and the batch runner.
+SPOTS_ENDNAME = "spots"
 
 # Adapter input contract (normalized detections CSV).
 REQUIRED_COLUMNS: tuple[str, ...] = ("image_id", "x", "y")
@@ -100,20 +126,22 @@ _EPS = 1e-6
 # Native-column resolution (SpotMAX output column names are NOT assumed)       #
 # --------------------------------------------------------------------------- #
 # SpotMAX is scikit-image flavoured, so its spot tables use (z, y, x) ordering
-# with x = column and y = row -- which is exactly spotpipe's convention. But the
-# exact column NAMES vary by version / table (``x``, ``x_local``, ``x_local_pxl``,
-# ``x_global``, ...), and some pipelines emit capitalised / row-col names. We do
-# NOT hard-code one name: we search these ordered candidates and RECORD which we
-# used (returned, logged, and embedded in flags) so the convention is verified,
-# not assumed. The exporter writes single 2-D frames, so the *local* pixel
-# coordinate is the spot's pixel position in the image we fed SpotMAX.
+# with x = column and y = row -- which is exactly spotpipe's convention. The exact
+# column NAMES vary by version / table; a real run (v1.3.1) emits BOTH a GLOBAL
+# whole-frame coordinate (``x`` / ``y``) and an object-LOCAL one (``x_local`` /
+# ``y_local``, relative to a segmented object's bounding box). We feed SpotMAX the
+# whole 2-D detection frame and extract intensity from the whole photon image, so
+# the GLOBAL coordinate is the one that aligns -- it is preferred here; local
+# variants are only a last-resort fallback (and equal the global one when there is
+# no segmentation). We do NOT hard-code one name: we search these ordered
+# candidates and RECORD which we used so the convention is verified, not assumed.
 X_COLUMN_CANDIDATES: tuple[str, ...] = (
-    "x_local_pxl", "x_local", "x_local_px", "x_pxl", "x_global_pxl", "x_global",
-    "x", "col", "column", "X", "centroid-1", "centroid_x",
+    "x", "x_global", "x_global_pxl", "col", "column", "X", "centroid-1", "centroid_x",
+    "x_local", "x_local_pxl", "x_local_px", "x_pxl",
 )
 Y_COLUMN_CANDIDATES: tuple[str, ...] = (
-    "y_local_pxl", "y_local", "y_local_px", "y_pxl", "y_global_pxl", "y_global",
-    "y", "row", "Y", "centroid-0", "centroid_y",
+    "y", "y_global", "y_global_pxl", "row", "Y", "centroid-0", "centroid_y",
+    "y_local", "y_local_pxl", "y_local_px", "y_pxl",
 )
 # Confidence is NOT a stable SpotMAX field; default to NaN unless one of these is
 # present (higher = more confident). p-value-like fields are intentionally left
@@ -124,8 +152,19 @@ P_DETECT_COLUMN_CANDIDATES: tuple[str, ...] = (
 )
 # Which output table to prefer when several are present. We use SpotMAX as a
 # localizer, so valid (filtered) spots first, then all detected spots; spotfit is
-# only a fallback for positions (its native intensities are never used).
-TABLE_PRIORITY: tuple[str, ...] = ("1_valid_spots", "0_detected_spots", "2_spotfit")
+# only a fallback for positions (its native intensities are never used). Matched
+# as case-insensitive substrings (a real run names them e.g.
+# ``1_1_valid_spots_<basename>.csv`` / ``1_0_detected_spots_<basename>.csv``).
+TABLE_PRIORITY: tuple[str, ...] = ("valid_spots", "detected_spots", "spotfit")
+
+# SpotMAX's output directory name, matched CASE-INSENSITIVELY: a real run writes
+# ``spotMAX_output`` (lower-s), and case-sensitive filesystems would otherwise
+# miss it.
+_OUTPUT_DIR_NAME = "spotmax_output"
+# Per-object AGGREGATE tables (one row per segmented object, not per spot) are
+# never the per-spot table we want; excluded by this substring.
+_AGGREGATE_MARKER = "aggregated"
+_TABLE_SUFFIXES = (".csv", ".h5", ".hdf", ".hdf5", ".txt")
 
 
 def resolve_xy_columns(
@@ -207,25 +246,30 @@ def find_spotmax_tables(
 ) -> dict[str, Path]:
     """Map each ``Position_*`` folder to its single best SpotMAX output table.
 
-    Searches ``run_dir`` recursively for ``SpotMAX_output`` directories and, in
-    each, picks the highest-priority table (``table_priority``) actually present.
-    Returns ``{position_name: table_path}``. SpotMAX prefixes tables with a run
-    number (e.g. ``1_valid_spots_...csv``); we match by substring so the exact
-    prefix / suffix does not need to be known in advance.
+    Searches ``run_dir`` recursively for the SpotMAX output directory
+    (``spotMAX_output``, matched case-insensitively) and, in each, picks the
+    highest-priority table (``table_priority``) actually present, EXCLUDING
+    per-object aggregate tables. Returns ``{position_name: table_path}``. SpotMAX
+    prefixes tables with run/table numbers (e.g. ``1_1_valid_spots_<basename>.csv``);
+    we match priority keys as case-insensitive substrings so the exact prefix /
+    suffix / basename does not need to be known in advance.
     """
     run_dir = Path(run_dir)
     out: dict[str, Path] = {}
-    for sm_dir in sorted(run_dir.rglob("SpotMAX_output")):
-        if not sm_dir.is_dir():
-            continue
-        # Position folder is the SpotMAX_output's grandparent: <Position>/Images/.. or
-        # <Position>/SpotMAX_output; resolve by walking up to a 'Position'-named dir.
+    sm_dirs = sorted(p for p in run_dir.rglob("*")
+                     if p.is_dir() and p.name.lower() == _OUTPUT_DIR_NAME)
+    for sm_dir in sm_dirs:
+        # Resolve the owning Position by walking up to a 'Position'-named ancestor
+        # (the output dir is a sibling of Images, or nested -- handled either way).
         position = _position_name_for(sm_dir)
-        tables = [p for p in sm_dir.iterdir() if p.is_file() and p.suffix.lower() in
-                  (".csv", ".h5", ".hdf", ".hdf5", ".txt")]
+        tables = [
+            p for p in sm_dir.iterdir()
+            if p.is_file() and p.suffix.lower() in _TABLE_SUFFIXES
+            and _AGGREGATE_MARKER not in p.name.lower()
+        ]
         chosen: Path | None = None
         for key in table_priority:
-            matches = sorted(p for p in tables if key in p.name)
+            matches = sorted(p for p in tables if key.lower() in p.name.lower())
             if matches:
                 chosen = matches[0]
                 break
@@ -335,10 +379,8 @@ def load_normalized_spotmax_detections(path: str | Path) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Detections + photon images -> canonical schema                               #
 # --------------------------------------------------------------------------- #
-def _flags_for(detect_image: str) -> str:
-    return (
-        f"{SPOTMAX_METHOD};detect_image={detect_image};photometry=aperture_annulus"
-    )
+def _flags_for(method_name: str, detect_image: str) -> str:
+    return f"{method_name};detect_image={detect_image};photometry=aperture_annulus"
 
 
 def spotmax_plus_aperture(
@@ -347,6 +389,7 @@ def spotmax_plus_aperture(
     *,
     image_id: str,
     cfg: dict | None = None,
+    method_name: str = SPOTMAX_METHOD_AI,
 ) -> tuple[pd.DataFrame, dict]:
     """SpotMAX centres + aperture photometry on the photon images -> canonical schema.
 
@@ -400,7 +443,7 @@ def spotmax_plus_aperture(
 
     policy = str(cfg.get("nonpositive", "clamp")).lower()
     detect_image = str(cfg.get("detect_image", "raw_max"))
-    base_flags = _flags_for(detect_image)
+    base_flags = _flags_for(method_name, detect_image)
 
     records = []
     for k in range(n_in):
@@ -429,6 +472,203 @@ def spotmax_plus_aperture(
 
 
 # --------------------------------------------------------------------------- #
+# Merge + canonical conversion (shared by the convert script + batch runner)    #
+# --------------------------------------------------------------------------- #
+def merge_neutral_detections(paths) -> pd.DataFrame:
+    """Concatenate per-batch neutral detection CSVs into one neutral frame.
+
+    Each path must hold a neutral CSV (:data:`NEUTRAL_COLUMNS`). Batches partition
+    the frozen set by image, so a plain concat is the correct merge (no image
+    appears in two batches). Validates columns, coerces ``image_id`` -> str, and
+    returns exactly :data:`NEUTRAL_COLUMNS`. An empty input yields an empty,
+    correctly-typed frame.
+    """
+    frames = []
+    for p in paths:
+        df = pd.read_csv(p)
+        missing = [c for c in NEUTRAL_COLUMNS if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"neutral detections CSV {str(p)!r} is missing columns {missing}; "
+                f"expected {list(NEUTRAL_COLUMNS)}"
+            )
+        frames.append(df[list(NEUTRAL_COLUMNS)])
+    if not frames:
+        return pd.DataFrame(columns=list(NEUTRAL_COLUMNS))
+    out = pd.concat(frames, ignore_index=True)
+    out["image_id"] = out["image_id"].astype(str)
+    return out
+
+
+def load_photon_images(bench_dir: str | Path, image_ids) -> dict[str, np.ndarray]:
+    """Load the ``[2, H, W]`` photon image for each requested image_id.
+
+    Reads the frozen set's manifest and the ``images_ch{1,2}_photon`` TIFFs (the
+    fair-photometry inputs). Image ids absent from the manifest are skipped. Never
+    reads raw counts or the simulator true-background files.
+    """
+    import tifffile
+
+    bench_dir = Path(bench_dir)
+    with open(bench_dir / "manifest.json", "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    by_id = {str(e["image_id"]): e for e in manifest["images"]}
+    out: dict[str, np.ndarray] = {}
+    for image_id in sorted(set(map(str, image_ids))):
+        entry = by_id.get(image_id)
+        if entry is None:
+            continue
+        p1 = tifffile.imread(bench_dir / entry["ch1_photon"])
+        p2 = tifffile.imread(bench_dir / entry["ch2_photon"])
+        out[image_id] = np.stack([p1, p2], axis=0).astype(float)
+    return out
+
+
+def neutral_to_canonical(
+    neutral_df: pd.DataFrame,
+    bench_dir: str | Path,
+    *,
+    cfg: dict | None = None,
+    method_name: str = SPOTMAX_METHOD_AI,
+) -> tuple[pd.DataFrame, dict]:
+    """Neutral detections + photon images -> canonical 16-column predictions.
+
+    Groups ``neutral_df`` by ``image_id``, extracts ``I1`` / ``I2`` by aperture +
+    annulus photometry on each image's photon image (the SINGLE photometry path,
+    shared with the harness adapter), and emits the canonical schema with honest
+    ``method_name`` flags. Returns ``(canonical_df, stats)`` where ``stats``
+    reports ``n_in / n_out / n_nonpositive / n_missing_image`` (transparent
+    counts; non-positive intensities are clamped+flagged or rejected per
+    ``cfg['nonpositive']``).
+    """
+    cfg = cfg or {}
+    neutral_df = neutral_df.copy()
+    neutral_df["image_id"] = neutral_df["image_id"].astype(str)
+    photon_by_image = load_photon_images(bench_dir, neutral_df["image_id"].unique())
+
+    total = {"n_in": 0, "n_out": 0, "n_nonpositive": 0, "n_missing_image": 0}
+    frames = []
+    for image_id, sub in neutral_df.groupby("image_id"):
+        photon = photon_by_image.get(str(image_id))
+        if photon is None:
+            total["n_missing_image"] += int(len(sub))
+            continue
+        df, stats = spotmax_plus_aperture(
+            photon, sub, image_id=str(image_id), cfg=cfg, method_name=method_name,
+        )
+        for k in ("n_in", "n_out", "n_nonpositive"):
+            total[k] += stats[k]
+        frames.append(df)
+    pred = pd.concat(frames, ignore_index=True) if frames else records_to_dataframe([])
+    return pred, total
+
+
+# --------------------------------------------------------------------------- #
+# Detection-input export + INI rewrite (shared by exporter + batch runner)      #
+# --------------------------------------------------------------------------- #
+def build_detect_image(ch1: np.ndarray, ch2: np.ndarray, detect_image: str) -> np.ndarray:
+    """Collapse the two raw channels into the single 2-D image SpotMAX detects on.
+
+    ``raw_max`` (default + recommended first protocol) is the pixelwise max so a
+    spot bright in EITHER channel can be found. Output is float32.
+    """
+    a = np.asarray(ch1, dtype=np.float32)
+    b = np.asarray(ch2, dtype=np.float32)
+    if detect_image == "raw_max":
+        return np.maximum(a, b)
+    if detect_image == "raw_sum":
+        return a + b
+    if detect_image == "master_ch1":
+        return a
+    if detect_image == "master_ch2":
+        return b
+    raise ValueError(
+        f"unknown detect_image {detect_image!r}; supported: "
+        "raw_max | raw_sum | master_ch1 | master_ch2"
+    )
+
+
+def position_name(index: int) -> str:
+    """1-based SpotMAX Position folder name (``Position_000001`` ...)."""
+    return f"Position_{index + 1:06d}"
+
+
+def export_positions(
+    bench_dir: str | Path,
+    entries: list[dict],
+    input_root: str | Path,
+    detect_image: str,
+    *,
+    start_index: int = 0,
+) -> list[dict]:
+    """Write a Cell-ACDC / SpotMAX ``Position_*/Images`` tree for ``entries``.
+
+    For each frozen-set manifest ``entry`` it reads the two RAW channels, builds
+    the detection image (``detect_image``), and writes
+    ``<input_root>/Position_<n>/Images/Position_<n>_{SPOTS_ENDNAME}.tif``. Returns
+    id-map rows (``position`` <-> benchmark ``image_id`` + provenance) for the
+    caller to persist as ``id_map.csv``. Reads only the raw channels (never the
+    photon or simulator true-background files).
+    """
+    import tifffile
+
+    bench_dir = Path(bench_dir)
+    input_root = Path(input_root)
+    input_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for i, entry in enumerate(entries):
+        image_id = str(entry["image_id"])
+        position = position_name(start_index + i)
+        ch1 = tifffile.imread(bench_dir / entry["ch1_raw"])
+        ch2 = tifffile.imread(bench_dir / entry["ch2_raw"])
+        detect = build_detect_image(ch1, ch2, detect_image)
+
+        images_dir = input_root / position / "Images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        tif_path = images_dir / f"{position}_{SPOTS_ENDNAME}.tif"
+        tifffile.imwrite(tif_path, detect.astype(np.float32))
+
+        rows.append({
+            "position": position,
+            "image_id": image_id,
+            "detect_image": detect_image,
+            "spots_tif": str(tif_path.relative_to(input_root)),
+            "src_ch1_raw": entry["ch1_raw"],
+            "src_ch2_raw": entry["ch2_raw"],
+            "height": int(detect.shape[0]),
+            "width": int(detect.shape[1]),
+        })
+    return rows
+
+
+def rewrite_ini_folder_path(template_text: str, new_folder, *, key: str = "Folder path") -> str:
+    """Return ``template_text`` with the ``<key> = ...`` line repointed at ``new_folder``.
+
+    Targeted, line-based rewrite (not configparser) so the rest of the GUI-saved
+    SpotMAX INI is preserved byte-for-byte (section names with spaces, ordering,
+    comments). Case-insensitive on the key. Raises ``ValueError`` if no such line
+    exists, so a renamed key is surfaced rather than silently ignored.
+    """
+    import re
+
+    pat = re.compile(rf"^(\s*{re.escape(key)}\s*=)(.*)$", re.IGNORECASE)
+    out_lines, found = [], False
+    for line in template_text.splitlines():
+        m = pat.match(line)
+        if m:
+            out_lines.append(f"{m.group(1)} {new_folder}")
+            found = True
+        else:
+            out_lines.append(line)
+    if not found:
+        raise ValueError(
+            f"INI template has no '{key} =' line to rewrite; pass --ini-folder-key "
+            "with the actual key name from your GUI-saved INI."
+        )
+    return "\n".join(out_lines) + "\n"
+
+
+# --------------------------------------------------------------------------- #
 # Adapter                                                                      #
 # --------------------------------------------------------------------------- #
 class SpotmaxPlusApertureAdapter:
@@ -449,10 +689,13 @@ class SpotmaxPlusApertureAdapter:
     counts logged.
     """
 
-    name = SPOTMAX_METHOD
+    name = SPOTMAX_METHOD_AI
 
-    def __init__(self, *, log_fn=print, **kwargs):
-        self.name = SPOTMAX_METHOD
+    def __init__(self, *, method_name: str = SPOTMAX_METHOD_AI, log_fn=print, **kwargs):
+        # Instance-level name so the harness/registry report the honest method name
+        # (AI vs threshold), and so the emitted `flags` match it.
+        self.name = method_name
+        self.method_name = method_name
         self._log = log_fn
 
     def predict(self, eval_set, config: dict) -> pd.DataFrame:
@@ -488,7 +731,9 @@ class SpotmaxPlusApertureAdapter:
             if sub is None or len(sub) == 0:
                 continue  # never fabricate spots for an image with no detections
             photon = CmeAnalysisPlusApertureAdapter._photon_for(item)
-            df, stats = spotmax_plus_aperture(photon, sub, image_id=item.image_id, cfg=scfg)
+            df, stats = spotmax_plus_aperture(
+                photon, sub, image_id=item.image_id, cfg=scfg, method_name=self.name,
+            )
             for k in total:
                 total[k] += stats[k]
             frames.append(df)

@@ -1,9 +1,18 @@
-# `spotmax_ai_plus_aperture` — SpotMAX (external detector) + aperture photometry
+# SpotMAX (external detector) + aperture photometry
 
-A benchmark method that uses **SpotMAX as detector/localizer only** and extracts
-canonical intensities in-repo by aperture + annulus photometry on the
-photon-proportional images. It is opt-in (not in the default `methods:` list);
-enable with `--methods spotmax_ai_plus_aperture`.
+Two opt-in benchmark methods that use **SpotMAX as detector/localizer only** and
+extract canonical intensities in-repo by aperture + annulus photometry on the
+photon-proportional images. They **share one adapter** and differ ONLY in how
+SpotMAX was configured to detect (carried honestly in the method name + `flags`):
+
+| method | SpotMAX detector |
+|--------|------------------|
+| `spotmax_ai_plus_aperture` | `spotMAX AI` |
+| `spotmax_threshold_plus_aperture` | `Thresholding` + `peak_local_max` (classical, non-AI) |
+
+Both are opt-in (not in the default `methods:` list); enable with e.g.
+`--methods spotmax_threshold_plus_aperture`. Pick the name that matches the
+detector your working INI actually used — never label a thresholding run as `ai`.
 
 ## Architecture / boundaries
 
@@ -132,16 +141,69 @@ uv run python scripts/run_benchmark.py \
   --out external_runs/spotmax/smoke/benchmark
 ```
 
-Run the full set (drop `--limit`) only after the smoke run succeeds.
+Run the full set (drop `--limit`) only after the smoke run succeeds. For the
+canonical CSV of the threshold method, pass `--method spotmax_threshold_plus_aperture`
+to `convert_spotmax_output.py`.
+
+## Full set in memory-bounded batches (`scripts/run_spotmax_batches.py`)
+
+A 5-image SpotMAX run peaked >95% RAM, so the full frozen set is processed in
+independent batches (default 5 images), each a **fresh** `spotmax` process that
+releases memory before the next. The helper never imports SpotMAX — it drives the
+external CLI as a subprocess. Stages (`--stages`, comma list, runnable separately
+and resumable):
+
+| stage | does |
+|-------|------|
+| `prepare` | split into batches; per batch write a `Position_*/Images` tree + `id_map.csv` + a `config.ini` derived from your **working GUI-saved INI** (only the `Folder path` line is repointed; everything else preserved) |
+| `run` | for each batch lacking output, run `<--spotmax-cmd> -p <batch>/config.ini` (skips done batches) |
+| `merge` | parse each batch's tables → per-batch neutral, then **merge** into one neutral CSV |
+| `convert` | merged neutral + photon images → canonical predictions (honest `--method` flags) |
+| `benchmark` | run the harness with `--method` over the frozen set |
+
+```bash
+# 1) prepare batches + per-batch INIs from your working GUI-saved INI
+uv run python scripts/run_spotmax_batches.py --stages prepare \
+  --benchmark data/benchmark_test_v1 --out external_runs/spotmax/full \
+  --template-ini external_runs/spotmax/working_threshold.ini --batch-size 5
+
+# 2) in your SpotMAX env, run each batches/batch_*/config.ini
+#    (or let the helper drive it:  --stages run --spotmax-cmd spotmax)
+
+# 3) merge + convert + benchmark with the honest threshold name
+uv run python scripts/run_spotmax_batches.py --stages merge,convert,benchmark \
+  --benchmark data/benchmark_test_v1 --out external_runs/spotmax/full \
+  --method spotmax_threshold_plus_aperture
+```
+
+If SpotMAX's INI uses a key other than `Folder path` for the data folder, pass
+`--ini-folder-key "<that key>"`. Coordinate-column overrides (`--x-col/--y-col/--p-col`)
+flow through to the parser.
 
 All generated artifacts (exported TIFFs, INIs, SpotMAX output, prediction CSVs,
 benchmark figures) live under git-ignored paths (`external_runs/`, `SpotMAX_output/`,
 `data/**`, `*.tif`).
 
+## Real-run output notes (SpotMAX v1.3.1)
+
+Confirmed from a real Thresholding + `peak_local_max` smoke run:
+
+- The output directory is `spotMAX_output` (lower-`s`) — matched **case-insensitively**.
+- Per-spot tables are `1_1_valid_spots_<basename>.csv` / `1_0_detected_spots_<basename>.csv`;
+  there are also `*_aggregated.csv` siblings (one row per segmented object) which
+  are **excluded** (wrong granularity).
+- Tables carry **both** global `x,y` and object-local `x_local,y_local`. The
+  parser prefers the **global** coordinate (it aligns with the whole photon image;
+  local would be bbox-relative under segmentation).
+- There is no higher-is-better confidence column (only `*_pvalue` / `*_effect_size`),
+  so `p_detect` is left `NaN`.
+
 ## Tests
 
 `tests/test_spotmax_adapter.py` runs without SpotMAX installed: it fabricates
 SpotMAX-style output tables + tiny photon images and checks the parse → neutral →
-canonical chain, the `x=column / y=row` convention, the non-positive policy, and
-that importing `spotpipe` never imports `spotmax`. An optional real-CLI smoke is
-skipped when `spotmax` is not on PATH.
+canonical chain, the `x=column / y=row` convention (incl. global-over-local
+preference and the real lowercase-dir / `_aggregated` layout), the non-positive
+policy, the two honest method names + flags (AI vs threshold), merged neutral
+detections, the INI folder-path rewrite, and that importing `spotpipe` never
+imports `spotmax`. An optional real-CLI smoke is skipped when `spotmax` is not on PATH.

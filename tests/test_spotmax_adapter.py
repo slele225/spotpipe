@@ -146,6 +146,38 @@ def test_parse_prefers_valid_over_detected() -> None:
     assert neutral["native_source_file"].iloc[0] == "1_valid_spots.csv"
 
 
+def test_parse_real_run_layout() -> None:
+    """Mirror a REAL SpotMAX v1.3.1 run: lowercase dir, run-numbered + aggregated
+    table names, and BOTH global (x,y) and object-local (x_local,y_local) columns.
+    Must: find the dir case-insensitively, skip the aggregated table, prefer the
+    valid table, and map the GLOBAL coordinate (not the bbox-local one)."""
+    from spotpipe.benchmark import spotmax as smx
+
+    cols = lambda gx, gy: pd.DataFrame({
+        "frame_i": [0], "Cell_ID": [1], "spot_id": [1],
+        "z": [0], "y": [gy], "x": [gx],                 # GLOBAL whole-frame coords
+        "y_local": [gy - 100], "x_local": [gx - 100],   # object-bbox-relative (wrong here)
+        "spot_vs_backgr_ttest_pvalue": [0.01],          # p-value, not a confidence
+    })
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        sm = root / "Position_000001" / "spotMAX_output"   # real lowercase casing
+        sm.mkdir(parents=True)
+        cols(126, 191).to_csv(sm / "1_0_detected_spots_spotpipe_smoke.csv", index=False)
+        cols(126, 191).to_csv(sm / "1_1_valid_spots_spotpipe_smoke.csv", index=False)
+        # aggregate siblings (one row per object) must be ignored:
+        cols(0, 0).to_csv(sm / "1_1_valid_spots_spotpipe_smoke_aggregated.csv", index=False)
+        neutral = smx.parse_spotmax_output(root, {"Position_000001": "imgZ"})
+
+    assert len(neutral) == 1
+    assert "valid_spots" in neutral["native_source_file"].iloc[0]
+    assert "aggregated" not in neutral["native_source_file"].iloc[0]
+    # GLOBAL coordinate chosen (126,191), NOT the bbox-local (26,91).
+    assert neutral["x"].iloc[0] == 126.0 and neutral["y"].iloc[0] == 191.0
+    # only a p-value is present -> no fabricated confidence.
+    assert neutral["p_detect"].isna().all()
+
+
 # --------------------------------------------------------------------------- #
 # 3. Coordinate-column resolution (x=col, y=row)                              #
 # --------------------------------------------------------------------------- #
@@ -153,6 +185,9 @@ def test_resolve_xy_columns() -> None:
     from spotpipe.benchmark import spotmax as smx
 
     assert smx.resolve_xy_columns(["z", "y", "x"]) == ("x", "y")
+    # GLOBAL x/y preferred over object-local when both present (real-run schema).
+    assert smx.resolve_xy_columns(["z", "y", "x", "y_local", "x_local"]) == ("x", "y")
+    # local-only is a valid fallback.
     assert smx.resolve_xy_columns(["x_local", "y_local"]) == ("x_local", "y_local")
     # explicit override wins
     assert smx.resolve_xy_columns(["a", "b", "x", "y"], x_col="a", y_col="b") == ("a", "b")
@@ -305,7 +340,107 @@ def test_adapter_end_to_end_with_stub_eval_item() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 9. Optional real-SpotMAX CLI smoke (skipped unless installed)               #
+# 9. Honest method names + flags: AI vs threshold share one adapter           #
+# --------------------------------------------------------------------------- #
+def test_both_methods_registered_with_honest_names() -> None:
+    from spotpipe.benchmark.adapters import ADAPTER_REGISTRY, get_adapter
+    from spotpipe.benchmark import spotmax as smx
+
+    assert smx.SPOTMAX_METHOD_AI == "spotmax_ai_plus_aperture"
+    assert smx.SPOTMAX_METHOD_THRESHOLD == "spotmax_threshold_plus_aperture"
+    for name in ("spotmax_ai_plus_aperture", "spotmax_threshold_plus_aperture"):
+        assert name in ADAPTER_REGISTRY
+        assert get_adapter(name).name == name   # instance reports the honest name
+
+
+def test_threshold_flags_are_honest() -> None:
+    """The threshold method emits flags naming the threshold detector, not 'ai'."""
+    from spotpipe.benchmark import spotmax as smx
+
+    photon = _bright_photon(centres=((40, 10),))
+    det = pd.DataFrame({"x": [40.0], "y": [10.0]})
+    cfg = {"window_radius_px": 3.0, "bg_inner_px": 5.0, "bg_outer_px": 8.0}
+
+    ai, _ = smx.spotmax_plus_aperture(photon, det, image_id="i", cfg=cfg,
+                                      method_name=smx.SPOTMAX_METHOD_AI)
+    thr, _ = smx.spotmax_plus_aperture(photon, det, image_id="i", cfg=cfg,
+                                       method_name=smx.SPOTMAX_METHOD_THRESHOLD)
+    assert ai["flags"].iloc[0] == "spotmax_ai_plus_aperture;detect_image=raw_max;photometry=aperture_annulus"
+    assert thr["flags"].iloc[0] == "spotmax_threshold_plus_aperture;detect_image=raw_max;photometry=aperture_annulus"
+    # default method_name is AI (back-compat).
+    default, _ = smx.spotmax_plus_aperture(photon, det, image_id="i", cfg=cfg)
+    assert default["flags"].iloc[0].startswith("spotmax_ai_plus_aperture;")
+
+
+def test_threshold_adapter_end_to_end_flags() -> None:
+    from spotpipe.benchmark.adapters import get_adapter
+    from spotpipe.schema import SCHEMA_COLUMNS
+
+    photon = _bright_photon(centres=((40, 10), (50, 20)))
+    item = SimpleNamespace(image_id="imgA", photon=photon, image=None, meta={})
+    with tempfile.TemporaryDirectory() as tmp:
+        det_csv = Path(tmp) / "neutral.csv"
+        pd.DataFrame({"image_id": ["imgA", "imgA"], "x": [40.0, 50.0], "y": [10.0, 20.0],
+                      "p_detect": [np.nan, np.nan]}).to_csv(det_csv, index=False)
+        adapter = get_adapter("spotmax_threshold_plus_aperture")
+        pred = adapter.predict([item], {"spotmax": {"detections_csv": str(det_csv),
+                                                    "window_radius_px": 3.0,
+                                                    "bg_inner_px": 5.0, "bg_outer_px": 8.0}})
+    assert list(pred.columns) == list(SCHEMA_COLUMNS)
+    assert (pred["flags"] == "spotmax_threshold_plus_aperture;detect_image=raw_max;photometry=aperture_annulus").all()
+
+
+# --------------------------------------------------------------------------- #
+# 10. Merged neutral detections (batched full-run helper)                      #
+# --------------------------------------------------------------------------- #
+def test_merge_neutral_detections() -> None:
+    from spotpipe.benchmark import spotmax as smx
+
+    def _neutral(image_ids, n_each):
+        rows = []
+        for img in image_ids:
+            for r in range(n_each):
+                rows.append({"image_id": img, "x": float(r), "y": float(r + 1),
+                             "p_detect": np.nan, "native_source_file": "1_valid_spots.csv",
+                             "native_row": r, "native_columns_json": "{}"})
+        return pd.DataFrame(rows, columns=list(smx.NEUTRAL_COLUMNS))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        # two image-disjoint batches (as the batch runner produces).
+        b0 = Path(tmp) / "b0.csv"; _neutral(["img_0", "img_1"], 3).to_csv(b0, index=False)
+        b1 = Path(tmp) / "b1.csv"; _neutral(["img_2"], 2).to_csv(b1, index=False)
+        merged = smx.merge_neutral_detections([b0, b1])
+
+    assert list(merged.columns) == list(smx.NEUTRAL_COLUMNS)
+    assert len(merged) == 3 * 2 + 2                      # all rows preserved, nothing dropped
+    assert sorted(merged["image_id"].unique()) == ["img_0", "img_1", "img_2"]
+    assert merged["image_id"].dtype == object            # coerced to str
+    # empty input -> empty, correctly-typed frame.
+    assert list(smx.merge_neutral_detections([]).columns) == list(smx.NEUTRAL_COLUMNS)
+
+
+def test_rewrite_ini_folder_path() -> None:
+    from spotpipe.benchmark import spotmax as smx
+
+    template = (
+        "[File paths and channels]\n"
+        "Folder path = C:/old/path\n"
+        "Spots channel end name = spots\n"
+        "[METADATA]\n"
+        "SizeZ = 1\n"
+    )
+    out = smx.rewrite_ini_folder_path(template, "D:/new/batch_000/input")
+    assert "Folder path = D:/new/batch_000/input" in out
+    assert "C:/old/path" not in out
+    assert "Spots channel end name = spots" in out          # other lines preserved
+    assert "SizeZ = 1" in out
+    # missing key -> loud error, not a silent no-op.
+    with pytest.raises(ValueError):
+        smx.rewrite_ini_folder_path("[X]\nfoo = bar\n", "whatever")
+
+
+# --------------------------------------------------------------------------- #
+# 11. Optional real-SpotMAX CLI smoke (skipped unless installed)              #
 # --------------------------------------------------------------------------- #
 def test_real_spotmax_cli_available_smoke() -> None:
     import shutil
@@ -323,7 +458,8 @@ if __name__ == "__main__":
     print("=" * 70 + "\nSPOTMAX ADAPTER TESTS (standalone)\n" + "=" * 70)
     test_module_does_not_import_spotmax_at_source(); print("1. no spotmax import ....... ok")
     test_parse_spotmax_output_to_neutral(); print("2. parse -> neutral ........ ok")
-    test_parse_prefers_valid_over_detected(); print("   valid>detected ......... ok")
+    test_parse_prefers_valid_over_detected(); test_parse_real_run_layout()
+    print("   valid>detected, real layout ... ok")
     test_resolve_xy_columns(); test_resolve_p_detect_column(); print("3. column resolution ....... ok")
     test_spotmax_plus_aperture_canonical_schema(); print("4. canonical 16 columns .... ok")
     test_coordinate_convention_x_is_column(); print("5. x=col, y=row ............ ok")
@@ -331,4 +467,7 @@ if __name__ == "__main__":
     test_load_normalized_validates_required_columns(); print("7. CSV contract ............ ok")
     test_adapter_requires_detections_csv(); test_adapter_module_never_references_audit()
     test_adapter_end_to_end_with_stub_eval_item(); print("8. adapter end-to-end ...... ok")
+    test_both_methods_registered_with_honest_names(); test_threshold_flags_are_honest()
+    test_threshold_adapter_end_to_end_flags(); print("9. AI vs threshold names .... ok")
+    test_merge_neutral_detections(); test_rewrite_ini_folder_path(); print("10. merge + INI rewrite .... ok")
     print("\nAll SpotMAX adapter tests passed.")

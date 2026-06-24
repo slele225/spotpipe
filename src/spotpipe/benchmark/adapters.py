@@ -273,15 +273,39 @@ def _spotiflow_finetuned_adapter(**kwargs) -> Adapter:
     )
 
 
-# The SpotMAX + aperture method is registered through this factory for the same
-# reasons as the Spotiflow ones: lazy import avoids the adapters <-> spotmax
-# import cycle, and `import spotpipe.benchmark.adapters` never pulls in the
-# external `spotmax` package (the in-repo spotmax module does not import it
-# either; only the CLI subprocess `spotmax -p config.ini` touches it).
-def _spotmax_adapter(**kwargs) -> Adapter:
-    from spotpipe.benchmark.spotmax import SpotmaxPlusApertureAdapter
+# The two SpotMAX + aperture methods share one adapter and are registered through
+# these factories for the same reasons as the Spotiflow ones: lazy import avoids
+# the adapters <-> spotmax import cycle, and `import spotpipe.benchmark.adapters`
+# never pulls in the external `spotmax` package (the in-repo spotmax module does
+# not import it either; only the CLI subprocess `spotmax -p config.ini` touches
+# it). The methods differ ONLY in how SpotMAX was configured to detect (AI vs
+# Thresholding+peak_local_max), carried honestly in the method name + flags; the
+# in-repo aperture/annulus photometry is identical.
+def _spotmax_ai_adapter(**kwargs) -> Adapter:
+    from spotpipe.benchmark.spotmax import SPOTMAX_METHOD_AI, SpotmaxPlusApertureAdapter
 
-    return SpotmaxPlusApertureAdapter(**kwargs)
+    return SpotmaxPlusApertureAdapter(method_name=SPOTMAX_METHOD_AI, **kwargs)
+
+
+def _spotmax_threshold_adapter(**kwargs) -> Adapter:
+    from spotpipe.benchmark.spotmax import (
+        SPOTMAX_METHOD_THRESHOLD,
+        SpotmaxPlusApertureAdapter,
+    )
+
+    return SpotmaxPlusApertureAdapter(method_name=SPOTMAX_METHOD_THRESHOLD, **kwargs)
+
+
+# The legacy `v0_hrnet` method is registered through this factory for the same
+# reasons: lazy import avoids the adapters <-> v0_hrnet cycle, and `import
+# spotpipe.benchmark.adapters` never pulls in torch / timm or the legacy repo (the
+# in-repo v0_hrnet module imports none of them; only scripts/run_v0_hrnet_predict.py
+# does, in a separate env). Unlike the `*_plus_aperture` methods, `v0_hrnet` uses
+# the legacy model's own intensities/uncertainties -- there is no aperture step.
+def _v0_hrnet_adapter(**kwargs) -> Adapter:
+    from spotpipe.benchmark.v0_hrnet import V0HrnetAdapter
+
+    return V0HrnetAdapter(**kwargs)
 
 
 # --------------------------------------------------------------------------- #
@@ -299,7 +323,9 @@ ADAPTER_REGISTRY: dict[str, object] = {
     ExternalPlaceholderAdapter.name: ExternalPlaceholderAdapter,
     "spotiflow_general_plus_aperture": _spotiflow_general_adapter,
     "spotiflow_finetuned_spotpipe_synth_plus_aperture": _spotiflow_finetuned_adapter,
-    "spotmax_ai_plus_aperture": _spotmax_adapter,
+    "spotmax_ai_plus_aperture": _spotmax_ai_adapter,
+    "spotmax_threshold_plus_aperture": _spotmax_threshold_adapter,
+    "v0_hrnet": _v0_hrnet_adapter,
 }
 
 # Backward-compatible aliases for the pre-rename method names. Deprecated: they
