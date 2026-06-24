@@ -139,8 +139,13 @@ def _run_matlab(args, cond_dir: Path, master: str, slave: str, out_csv: Path) ->
               "--matlab-wrapper-folder.", file=sys.stderr)
         return 2
 
-    sw = Path(args.cme_software_folder)
-    wrap = Path(args.matlab_wrapper_folder)
+    # MATLAB's path utilities (getDirFromPath) assume absolute paths, so resolve
+    # everything we hand off to absolute form (a relative condDir was the cause of
+    # the "Array indices must be positive integers" failure in getDirFromPath).
+    sw = Path(args.cme_software_folder).resolve()
+    wrap = Path(args.matlab_wrapper_folder).resolve()
+    cond_dir = cond_dir.resolve()
+    out_csv = out_csv.resolve()
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
     # Both folders are added to the path; the wrapper lives OUTSIDE the repo and
