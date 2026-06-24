@@ -16,6 +16,9 @@ uv.lock.tmp
 *.npy
 *.npz
 *.h5
+# Generated microscopy TIFFs (raw/photon/detection inputs) are reproducible, never committed.
+*.tif
+*.tiff
 
 # Generated simulator outputs (figures, datasets) live here; reproduce from config
 /outputs/
@@ -26,6 +29,12 @@ uv.lock.tmp
 external_models/
 outputs/external/
 .venvs/
+# SpotMAX (and other external-tool) run trees: exported detection TIFFs, generated
+# INIs, SpotMAX output tables, neutral/canonical prediction CSVs, benchmark figures.
+external_runs/
+spotmax_runs/
+SpotMAX_output/
+Position_*/
 
 # Per-experiment outputs (figures, metrics, checkpoints): reproduce from config + commit
 experiments/*/outputs/
@@ -36,6 +45,7 @@ experiments/*/outputs/
 # checksums -- never commit them through git. See data/README.md.
 data/benchmark_test_*/
 data/eval/
+data/fixed_eval/
 # Generated data files anywhere under data/ (images, tables, manifests). Docs
 # such as data/README.md (and any *.md) are *.md and stay tracked.
 data/**/*.tif

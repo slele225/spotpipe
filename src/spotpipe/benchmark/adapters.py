@@ -273,6 +273,17 @@ def _spotiflow_finetuned_adapter(**kwargs) -> Adapter:
     )
 
 
+# The SpotMAX + aperture method is registered through this factory for the same
+# reasons as the Spotiflow ones: lazy import avoids the adapters <-> spotmax
+# import cycle, and `import spotpipe.benchmark.adapters` never pulls in the
+# external `spotmax` package (the in-repo spotmax module does not import it
+# either; only the CLI subprocess `spotmax -p config.ini` touches it).
+def _spotmax_adapter(**kwargs) -> Adapter:
+    from spotpipe.benchmark.spotmax import SpotmaxPlusApertureAdapter
+
+    return SpotmaxPlusApertureAdapter(**kwargs)
+
+
 # --------------------------------------------------------------------------- #
 # Registry                                                                     #
 # --------------------------------------------------------------------------- #
@@ -288,6 +299,7 @@ ADAPTER_REGISTRY: dict[str, object] = {
     ExternalPlaceholderAdapter.name: ExternalPlaceholderAdapter,
     "spotiflow_general_plus_aperture": _spotiflow_general_adapter,
     "spotiflow_finetuned_spotpipe_synth_plus_aperture": _spotiflow_finetuned_adapter,
+    "spotmax_ai_plus_aperture": _spotmax_adapter,
 }
 
 # Backward-compatible aliases for the pre-rename method names. Deprecated: they

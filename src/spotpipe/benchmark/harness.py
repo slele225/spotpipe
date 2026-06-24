@@ -229,6 +229,21 @@ def default_benchmark_config() -> dict:
                 "model_dir": "external_models/spotiflow_finetuned_spotpipe_synth",
             },
         },
+        "spotmax": {
+            # SpotMAX (external detector, run headless via `spotmax -p config.ini`
+            # in its own env) + aperture photometry. Detections reach the harness
+            # only as a normalized/neutral CSV (image_id,x,y,p_detect,...) produced
+            # by scripts/convert_spotmax_output.py from the SpotMAX output tables.
+            # SpotMAX is detector/localizer ONLY -- canonical I1/I2 come from
+            # aperture + annulus photometry on the PHOTON images (same estimator as
+            # the aperture baseline), never from SpotMAX native intensities.
+            "detections_csv": None,        # neutral/normalized detections CSV
+            "detect_image": "raw_max",     # raw detector image fed to SpotMAX
+            "nonpositive": "clamp",        # clamp (keep+flag) | reject (drop+count)
+            "window_radius_px": 3.0,       # aperture radius (mirrors the aperture baseline)
+            "bg_inner_px": 5.0,            # local-background annulus inner radius (px)
+            "bg_outer_px": 8.0,            # local-background annulus outer radius (px)
+        },
         "uncertainty": {"n_sigma_bins": 8},
         "adc_max": 4095.0,
     }

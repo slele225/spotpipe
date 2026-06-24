@@ -87,6 +87,24 @@ benchmark:
       model_variant: finetuned_spotpipe_synth
       model_dir: external_models/spotiflow_finetuned_spotpipe_synth
 
+  # --- SpotMAX (external detector) + aperture photometry ---------------------
+  # OPT-IN method (not in `methods` above): enable via
+  #   --methods spotmax_ai_plus_aperture
+  # SpotMAX (Cell-ACDC) is run HEADLESS in its own env (`spotmax -p config.ini`);
+  # it never enters the spotpipe import graph. Its output tables (0_detected_spots
+  # / 1_valid_spots / 2_spotfit) are parsed into a neutral CSV (image_id,x,y,
+  # p_detect,native_*) by scripts/convert_spotmax_output.py. SpotMAX is detector/
+  # localizer ONLY -- canonical I1/I2 come from aperture+annulus photometry on the
+  # PHOTON images (same estimator as the aperture baseline), never from SpotMAX
+  # native intensities. detect_image=raw_max (pixelwise max of the two raw channels).
+  spotmax:
+    detections_csv: external_runs/spotmax/smoke/predictions/neutral_detections.csv
+    detect_image: raw_max         # pixelwise max(ch1_raw, ch2_raw) fed to SpotMAX
+    nonpositive: clamp            # clamp (keep+flag) | reject (drop+count)
+    window_radius_px: 3.0         # aperture radius (mirrors the aperture baseline)
+    bg_inner_px: 5.0              # local-background annulus inner radius (px)
+    bg_outer_px: 8.0              # local-background annulus outer radius (px)
+
   # --- uncertainty calibration (our model only) ---
   uncertainty:
     n_sigma_bins: 8              # quantile bins for the predicted-sigma curve
