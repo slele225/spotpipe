@@ -14,7 +14,13 @@ dependencies = [
     "pandas",
     "matplotlib",
     "tqdm",
+    "tifffile",
 ]
+
+[dependency-groups]
+# Dev-only: the smoke tests also run standalone (`uv run python tests/...`),
+# so pytest is optional, but `uv run pytest` is the conventional entry point.
+dev = ["pytest"]
 
 [build-system]
 requires = ["hatchling"]

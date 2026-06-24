@@ -1,0 +1,49 @@
+# Benchmark configuration: matching gate, binning axes, method list, baselines.
+#
+# A SYNTHETIC-only benchmark (we hold the ground truth, so bias/variance are
+# exactly measurable). All metrics are binned by the two difficulty axes -- SNR
+# and spot density -- both 2-D and marginally. See CLAUDE.md: the central claim
+# is unbiased, low-variance recovery of per-spot intensities and the I2/I1 ratio
+# (and the ratio-law slope beta), especially in the dim x high-overlap corner.
+
+benchmark:
+  # --- matching: predicted spot <-> ground-truth spot, one-to-one, gated ---
+  match_radius_px: 3.0           # max centre separation to call a match (pixels)
+  match_method: greedy           # 'greedy' (nearest-first) or 'hungarian' (optimal)
+
+  # --- binning axes (edges; last edge may be .inf for ">= lo") ---
+  # SNR: per-spot photon-domain peak SNR of the LIMITING channel (see
+  # benchmark/features.py for the exact definition). Dim spots fall in low bins.
+  snr_bins: [0.0, 2.0, 5.0, 10.0, 20.0, 50.0, .inf]
+  # Density: local GT-neighbour count within density_radius_px (local overlap).
+  density_bins: [0.0, 1.0, 3.0, 6.0, .inf]
+  density_radius_px: 4.0         # radius (px) for the local-neighbour density axis
+
+  # --- methods to run (each is one adapter) ---
+  # Honest names: the two baselines are APERTURE/naive photometry (not PSF fits),
+  # and the oracle one is oracle-CENTRES only (intensities are still naive aperture
+  # reads). External tools (decode, spotiflow, external_placeholder) are stubbed
+  # until installed; listing one here logs a skip rather than aborting the run.
+  methods: [our_model, classical_per_channel_aperture, oracle_center_aperture_divide]
+
+  # --- naive baselines: aperture photometry (per channel) then divide ---
+  baseline:
+    window_radius_px: 3.0        # photometry aperture radius (px)
+    bg_inner_px: 4.0             # local-background annulus inner radius (px)
+    bg_outer_px: 7.0             # local-background annulus outer radius (px)
+    detect_smooth_sigma: 1.2     # LoG smoothing sigma for classical detection
+    detect_threshold_rel: 4.0    # detection threshold, in robust-noise sigmas
+    detect_footprint_px: 3       # local-maximum footprint (px)
+    min_separation_px: 2.0       # merge radius for per-channel detections
+
+  # --- our model inference (peak-finding on the heatmap) ---
+  our_model:
+    peak_threshold: 0.3          # min heatmap probability for a detection
+    nms_kernel: 3                # local-max NMS window (px)
+    max_spots: 2000              # cap per image (highest-confidence peaks)
+    logvar_min: -10.0            # derived-uncertainty clamp (matches the NLL)
+    logvar_max: 6.0
+
+  # --- uncertainty calibration (our model only) ---
+  uncertainty:
+    n_sigma_bins: 8              # quantile bins for the predicted-sigma curve

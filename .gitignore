@@ -17,6 +17,27 @@ uv.lock.tmp
 *.npz
 *.h5
 
+# Generated simulator outputs (figures, datasets) live here; reproduce from config
+/outputs/
+
+# Per-experiment outputs (figures, metrics, checkpoints): reproduce from config + commit
+experiments/*/outputs/
+
+# --- Generated benchmark/test datasets -------------------------------------
+# Datasets are reproducible artifacts (seed + config + git commit), NOT source.
+# Generate them ON the GPU instance and verify integrity via the manifest
+# checksums -- never commit them through git. See data/README.md.
+data/benchmark_test_*/
+data/eval/
+# Generated data files anywhere under data/ (images, tables, manifests). Docs
+# such as data/README.md (and any *.md) are *.md and stay tracked.
+data/**/*.tif
+data/**/*.tiff
+data/**/*.npy
+data/**/*.npz
+data/**/*.csv
+data/**/*.json
+
 # OS / editor
 .DS_Store
 Thumbs.db

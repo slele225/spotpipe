@@ -1,0 +1,109 @@
+# Smoke / overfit training config for the two-channel spot model.
+#
+# Deliberately tiny: small images, a small HRNet, a short schedule -- enough to
+# prove the loop runs end-to-end, the inference path emits the canonical schema,
+# and the loss/target construction can overfit a handful of images. This is NOT
+# a real training config (the full run uses configs/simulator.yaml scene ranges
+# and a larger model / longer schedule).
+#
+# Two clearly separated physics blocks, as everywhere (see CLAUDE.md):
+#   detector: FIXED instrument constants (sampled once, never randomised broadly)
+#   scene:    widely randomised domain randomisation (per image)
+
+seed: 0
+
+image:
+  height: 64          # divisible by 2**(num_branches-1) = 4
+  width: 64
+
+# --------------------------------------------------------------------------- #
+# DETECTOR -- fixed instrument constants (mirrors configs/simulator.yaml).      #
+# --------------------------------------------------------------------------- #
+detector:
+  n_frames: 3
+  poisson_gaussian_threshold: 20
+  adc_max: 4095
+  jitter_frac: 0.0
+  ch1:
+    gain: 2.5
+    offset: 100.0
+    excess_noise_factor: 1.5
+    saturation_knee: 2600.0
+    noise_floor_sigma: 8.0
+  ch2:
+    gain: 6.0
+    offset: 150.0
+    excess_noise_factor: 1.8
+    saturation_knee: 4200.0
+    noise_floor_sigma: 11.0
+
+# --------------------------------------------------------------------------- #
+# SCENE -- widely randomised (kept moderate so the smoke stays fast). beta      #
+# still spans 0 and negatives; PSF mismatch + registration + background remain. #
+# --------------------------------------------------------------------------- #
+scene:
+  density:
+    min: 0.001          # ~4 spots in 64x64
+    max: 0.006          # ~25 spots in 64x64
+  oversample_dense_fraction: 0.3
+  intensity:
+    log10_min: 1.8      # ~63 photons (moderate dim end; full sim goes dimmer)
+    log10_max: 3.6      # ~4000 photons
+    dim_bias: 1.2
+  ratio_law:
+    alpha:       {min: -0.7, max: 0.7}
+    beta:        {min: -0.6, max: 0.6}
+    scatter_std: {min: 0.03, max: 0.25}
+  psf:
+    sigma1:            {min: 1.0, max: 1.8}
+    c2_sigma_mismatch: {min: 1.05, max: 1.35}
+  registration_shift:
+    max_px: 1.0
+  background:
+    level:              {min: 2.0,  max: 20.0}
+    gradient_frac:      {min: 0.0,  max: 0.5}
+    structure_frac:     {min: 0.0,  max: 0.4}
+    structure_scale_px: {min: 12.0, max: 48.0}
+    real_crop: null
+  clustering:
+    cluster_prob: 0.3
+    n_clusters:       {min: 2, max: 6}
+    cluster_sigma_px: {min: 4.0, max: 16.0}
+
+# --------------------------------------------------------------------------- #
+# MODEL -- small HRNet (correctness/resolution over size for phase 1).          #
+# --------------------------------------------------------------------------- #
+model:
+  in_channels: 2
+  base_channels: 16
+  num_branches: 3       # resolutions {1, 1/2, 1/4}
+  blocks_per_branch: 2
+  head_mid_channels: 32
+  heatmap_bias: -2.19   # CenterNet focal-loss prior
+
+# --------------------------------------------------------------------------- #
+# TRAINING -- short schedule; curriculum ramps SCENE difficulty only.           #
+# --------------------------------------------------------------------------- #
+training:
+  steps: 200
+  batch_size: 4
+  lr: 0.002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0   # tame early multitask/NLL gradient spikes (avoids dead ReLU)
+  heatmap_sigma: 1.5    # tight blob: close spots stay separate peaks
+  intensity_logvar_warmup_fraction: 0.3  # fit logI mean first, then learn logvar
+  logvar_min: -10.0     # in-loss logvar clamp (stability only; head output unclamped)
+  logvar_max: 6.0
+  loss_weights:
+    heatmap: 1.0
+    offset: 1.0
+    intensity: 1.0
+  curriculum:
+    enabled: true
+    ramp_fraction: 0.6  # reach full difficulty by 60% of steps
+  val:
+    n_images: 6
+    eval_every: 50
+    seed: 12345
+  log_every: 25
+  checkpoint_every: 0   # final-only

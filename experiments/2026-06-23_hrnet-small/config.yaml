@@ -1,0 +1,131 @@
+# Experiment config: 2026-06-23_hrnet-small
+#
+# An experiment == shared code at a pinned git commit + this config.
+# Shared code lives only in src/spotpipe/. Do NOT add code to this folder.
+#
+# REAL overnight training run (prompt 5b). Baseline-capacity HRNet (~450k params)
+# trained with the FULL 40k-step schedule, best-checkpoint selection on the FIXED
+# validation set (primarily the dim x high-overlap hard corner), then an
+# auto-benchmark of the best checkpoint. Pairs with 2026-06-23_hrnet-large, which
+# is identical except for a 3-4x wider backbone -- the two together test whether
+# more capacity helps in the hard regime.
+#
+# Runs on the A100 if available (device auto-detects CUDA), else CPU.
+
+experiment:
+  name: 2026-06-23_hrnet-small
+  slug: hrnet-small
+  date: 2026-06-23
+  git_commit: ce697f485b7191529a1ea4fae2d2f36aebe5c09a-dirty   # pin the 5b shared-code commit before launch
+  note: 'Baseline-capacity real run (~450k-param HRNet); first serious overnight training + auto-benchmark.'
+  baseline: 2026-06-23_hrnet-validation
+
+# --- Config below overrides shared defaults. Keep it a DIFF from baseline. ---
+
+seed: 0          # both runs use seed 0: identical training stream + identical
+                 # fixed instrument (detector sampled from this seed) -> the ONLY
+                 # difference between small and large is model capacity.
+
+# Full FV3000 detector + full scene ranges (256x256) from the shared simulator
+# config. Detector constants are FIXED instrument constants (never curriculum-ramped).
+simulator_config: configs/simulator.yaml
+
+image:
+  height: 256
+  width: 256
+
+# --------------------------------------------------------------------------- #
+# MODEL -- small HRNet (~449k params; the validated baseline width).            #
+# --------------------------------------------------------------------------- #
+model:
+  in_channels: 2
+  base_channels: 16
+  num_branches: 3             # resolutions {1, 1/2, 1/4}
+  blocks_per_branch: 2
+  head_mid_channels: 32
+  heatmap_bias: -2.19         # CenterNet focal-loss prior
+
+# --------------------------------------------------------------------------- #
+# TRAINING -- full 40k-step schedule (prompt 5b). Three independent schedules   #
+# over one timeline; ordering holds:                                            #
+#   LR warmup ends (1500) < variance warmup ends (4000) < curriculum full       #
+#   (20000, then HOLD for the back half while cosine LR is still meaningful).    #
+# Every number is exposed so the schedule can be rescaled by editing train_steps #
+# and the others proportionally.                                                 #
+# --------------------------------------------------------------------------- #
+training:
+  train_steps: 40000          # scale this (and the others below) to fit available hours
+  batch_size: 16
+  lr: 0.002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  heatmap_sigma: 1.5
+
+  lr_warmup_steps: 1500       # ~3.75% linear warmup, then cosine decay to ~0
+  variance_warmup_steps: 4000 # fixed-variance mean-fit STEP COUNT, then learned logvar NLL
+  logvar_min: -10.0
+  logvar_max: 6.0
+
+  loss_weights:
+    heatmap: 1.0
+    offset: 1.0
+    intensity: 1.0            # NO ratio/slope loss in phase 1 (CLAUDE.md)
+
+  curriculum:
+    enabled: true
+    curriculum_ramp_steps: 20000   # easy->hard over first 50%, then HOLD at full difficulty
+
+  eval_every: 1000
+  checkpoint_every: 1000      # also writes a resumable train_state every checkpoint
+
+  # FIXED validation set: built ONCE (scripts/build_fixed_eval.py) and SHARED by
+  # both runs, used ONLY for best-checkpoint selection. Separate seed/manifest
+  # from the frozen test set.
+  val:
+    path: data/fixed_eval/val   # generate_dataset layout; loaded, targets rebuilt
+
+  best_checkpoint:
+    enabled: true
+    metric: val_logratio_mae        # selected PRIMARILY in the hard corner (below)
+    hard_corner_min_pairs: 50       # min matched pairs for the hard corner to drive selection,
+                                    # else fall back to overall MAE, then val_total_loss
+
+  log_every: 100
+
+# --------------------------------------------------------------------------- #
+# BENCHMARK -- end-of-run auto-benchmark on the BEST checkpoint. Reports on the  #
+# FROZEN TEST set if it exists at test_set_dir; otherwise runs a clearly         #
+# labelled PROVISIONAL benchmark on the validation set (written to               #
+# benchmark_provisional_val/, never a path that looks like a final test result). #
+# The single agreed binning is used everywhere (selection, tables, figures).     #
+# --------------------------------------------------------------------------- #
+benchmark:
+  # Frozen test set built by the separate make_benchmark_set.py prompt (see
+  # data/README.md). If absent at run time, the auto-benchmark falls back to a
+  # clearly-labelled PROVISIONAL val benchmark; if present but in an incompatible
+  # layout, it logs and falls back too (never crashes the unattended run).
+  test_set_dir: data/benchmark_test_v1
+  match_radius_px: 3.0
+  match_method: greedy
+  snr_bins: [0.0, 2.0, 5.0, 10.0, 20.0, 50.0, .inf]
+  density_bins: [0.0, 1.0, 3.0, 6.0, .inf]      # 4 bins; hard corner = SNR [0,2) x density [6,inf)
+  density_radius_px: 4.0
+  methods: [our_model, classical_per_channel_aperture, oracle_center_aperture_divide]
+  baseline:
+    window_radius_px: 3.0
+    bg_inner_px: 4.0
+    bg_outer_px: 7.0
+    detect_smooth_sigma: 1.2
+    detect_threshold_rel: 4.0
+    detect_footprint_px: 3
+    min_separation_px: 2.0
+  our_model:
+    peak_threshold: 0.3
+    nms_kernel: 3
+    max_spots: 2000
+    logvar_min: -10.0
+    logvar_max: 6.0
+  uncertainty:
+    n_sigma_bins: 8
+
+auto_benchmark: true
