@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+outputs/
+data/
+# checkpoints are tracked deliberately (small, precious) -- do NOT ignore
+# src/spotpipe/models/checkpoints/
