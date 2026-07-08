@@ -1,10 +1,9 @@
 [project]
 name = "spotpipe"
-version = "0.1.0"
-description = "Two-channel microscopy spot-detection pipeline (FV3000 forward model + neural spot detector)."
+version = "0.2.0"
+description = "Two-channel microscopy spot-detection pipeline (FV3000 forward model + neural spot detector). Rebuilt repo: vendored precious core, fresh harness."
 readme = "README.md"
-# torch does not yet publish wheels for Python 3.14; constrain so `uv sync`
-# resolves a supported interpreter (uv will fetch CPython 3.12 if needed).
+# torch does not publish wheels for Python 3.14 yet; constrain accordingly.
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy",
@@ -12,15 +11,14 @@ dependencies = [
     "torch",
     "pyyaml",
     "pandas",
-    "matplotlib",
-    "tqdm",
     "tifffile",
 ]
 
 [dependency-groups]
-# Dev-only: the smoke tests also run standalone (`uv run python tests/...`),
-# so pytest is optional, but `uv run pytest` is the conventional entry point.
 dev = ["pytest"]
+
+[project.scripts]
+spotpipe = "spotpipe.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -28,8 +26,3 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spotpipe"]
-
-[tool.uv]
-# Editable install of the local package so `from spotpipe... import ...`
-# resolves from anywhere (including experiments/ subfolders) with no sys.path hacks.
-package = true

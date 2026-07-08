@@ -63,7 +63,7 @@ import numpy as np
 import pandas as pd
 import tifffile
 
-from spotpipe.benchmark.features import axis_params_from_meta, local_neighbor_count, peak_snr
+from spotpipe.simulator._features import axis_params_from_meta, local_neighbor_count, peak_snr
 from spotpipe.schema import SCHEMA_COLUMNS, records_to_dataframe, write_spots
 from spotpipe.simulator import forward_model, noise
 from spotpipe.simulator.generate_dataset import _git_commit

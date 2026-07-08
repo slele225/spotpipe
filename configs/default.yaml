@@ -1,0 +1,80 @@
+# Default config: real sizes. Simulator blocks reproduce the old repo's
+# configs/simulator.yaml (@ 7b9a0b8); model block matches the hrnet-large
+# checkpoint (src/spotpipe/models/checkpoints/hrnet_large/).
+
+run:
+  n_images: 2000
+  seed: 0
+  split: train
+
+model:
+  in_channels: 2
+  base_channels: 32
+  num_branches: 3
+  blocks_per_branch: 2
+  head_mid_channels: 32
+  heatmap_bias: -2.19
+
+inference:
+  adc_max: 4095.0
+  peak_threshold: 0.3
+  nms_kernel: 3
+  max_spots: null
+
+simulator:
+  image:
+    height: 256
+    width: 256
+
+  # DETECTOR -- fixed instrument constants (sampled once per dataset; broad
+  # randomisation forbidden -- we do NOT want gain-invariance).
+  detector:
+    n_frames: 3
+    poisson_gaussian_threshold: 20
+    adc_max: 4095
+    jitter_frac: 0.0
+    ch1:
+      gain: 2.5
+      offset: 100.0
+      excess_noise_factor: 1.5
+      saturation_knee: 2600.0
+      noise_floor_sigma: 8.0
+    ch2:
+      gain: 6.0
+      offset: 150.0
+      excess_noise_factor: 1.8
+      saturation_knee: 4200.0
+      noise_floor_sigma: 11.0
+
+  # SCENE -- widely randomised domain randomisation (drawn per image).
+  scene:
+    density:
+      min: 0.0006
+      max: 0.012
+    oversample_dense_fraction: 0.3
+    intensity:
+      log10_min: 1.3
+      log10_max: 3.9
+      dim_bias: 1.6
+    # Ratio law drawn PER IMAGE: log A2 = log A1 + alpha + beta*log A1 + noise.
+    # beta is the INTERNAL generation coefficient; NO slope loss exists
+    # anywhere (CLAUDE.md rule 3) -- slope recovery is downstream-only.
+    ratio_law:
+      alpha:       {min: -0.7, max: 0.7}
+      beta:        {min: -0.6, max: 0.6}
+      scatter_std: {min: 0.03, max: 0.25}
+    psf:
+      sigma1:            {min: 1.0, max: 1.8}
+      c2_sigma_mismatch: {min: 1.05, max: 1.35}
+    registration_shift:
+      max_px: 1.0
+    background:
+      level:              {min: 2.0,  max: 25.0}
+      gradient_frac:      {min: 0.0,  max: 0.6}
+      structure_frac:     {min: 0.0,  max: 0.5}
+      structure_scale_px: {min: 16.0, max: 64.0}
+      real_crop: null
+    clustering:
+      cluster_prob: 0.4
+      n_clusters:       {min: 2, max: 8}
+      cluster_sigma_px: {min: 6.0, max: 24.0}

@@ -1,117 +1,71 @@
-# CLAUDE.md — spotpipe
+# spotpipe (rebuilt repo)
 
-Durable rules for this repo. Later prompts rely on these being here. Read before
-making changes.
+Two-channel microscopy spot-detection pipeline. This repo was rebuilt from
+`C:\Users\shivl\Videos\spotpipe` (old repo) by vendoring ONLY the precious core;
+everything else is rebuilt fresh here.
 
-## What this is
+## The precious-core principle
 
-A two-channel microscopy spot-detection pipeline. A neural network detects
-diffraction-limited spots in two-channel confocal images and estimates per-spot
-intensities in each channel, so a downstream log-ratio / slope analysis can
-recover a biological relationship. Training is on synthetic data from a forward
-model of an Olympus FV3000 (analog-integration PMT detector). Real-data
-calibration comes later.
+Three tiers, hardened by how expensive they are to reproduce:
 
-## Repo structure & the shared-code rule
+* **PRECIOUS** (cannot cheaply reproduce): the simulator / training-data
+  generator (`src/spotpipe/simulator/`), the model (`src/spotpipe/models/`),
+  the losses (`src/spotpipe/losses/`). Trained checkpoints
+  (`src/spotpipe/models/checkpoints/`) are precious. These are vendored
+  UNCHANGED from the old repo and pinned by git SHA (see `VENDORED_NOTES.md`).
+* **FROZEN INTERFACE**: the schema (`src/spotpipe/schema/schema.py`) — the
+  column format of prediction files and ground-truth files. This is what lets
+  every other piece be swapped freely.
+* **DISPOSABLE** (cheap to rewrite): benchmark harness, metrics, plotting,
+  baseline adapters. The old harness was deliberately NOT ported; it will be
+  rebuilt fresh in `src/spotpipe/benchmark/` (currently empty).
 
-- **Shared code lives ONLY in `src/spotpipe/`.** There is exactly one copy of
-  any shared code. It is imported as `from spotpipe.simulator import ...` from
-  anywhere — never via `sys.path` manipulation or path appending (the package is
-  installed editable).
-- **Experiments hold config + README + outputs ONLY — never code.** An
-  experiment is defined as *"shared code at a pinned git commit + this config."*
-  Copying code into an experiment folder is never necessary and never allowed.
-- New experiments are stamped with `scripts/new_experiment.py <slug>`, which
-  records the current git commit into the experiment's `config.yaml`.
+## Durable rules
 
-## Forward model & detector physics
+1. **Simulator / models / losses / schema are VENDORED + FROZEN.** Do not
+   modify their logic without an explicit instruction naming the file.
+   Anything that looks buggy goes in `VENDORED_NOTES.md`; the code stays
+   untouched.
+2. **The schema is frozen.** Never add, rename, or remove fields in
+   `spotpipe.schema`. Suffix convention: `_hat` = estimate.
+3. **NO slope/alpha/beta loss exists or may be added.** The curvature/ratio-law
+   slope is computed ONLY in the downstream analysis/benchmark layer, never as
+   a training signal. `losses/ratio.py` is a deliberate stub documenting this;
+   it must never become a loss.
+4. **All paths come from `spotpipe.paths`.** NO hardcoded absolute paths
+   anywhere — dev is Windows local, training is Linux remote; a `C:\` string
+   will break the remote. Paths root at env var `SPOTPIPE_ROOT` (default:
+   repo root).
+5. **Every compute-adding prompt ends with a timing/verification report and a
+   golden/sanity test.** No long runs before the smoke config
+   (`configs/smoke.yaml`, `spotpipe smoke`) passes.
+6. **Cached datasets are portable directory artifacts** moved by
+   `scripts/sync_to_remote.sh` — never referenced by machine-specific path.
+7. **Model checkpoints record the simulator SHA + config + seeds of their
+   training data.** See `src/spotpipe/models/checkpoints/*/PROVENANCE.md`.
+8. **Ambiguous scope, or a change touching a frozen module → STOP and ask.**
 
-- The forward model simulates an FV3000 analog-integration PMT chain. The two
-  channels are imaged at **different PMT voltages**, so they have different
-  per-channel gains and saturation behavior.
-- **Detector-physics parameters** — per-channel gain, offset, excess-noise
-  factor, saturation knee, noise floor, frame-averaging factor — are **FIXED or
-  narrowly randomized**. They are real instrument constants to be measured
-  later, not scene variables. Do **not** broadly randomize them; we do **not**
-  want the network to be gain-invariant.
-- **Scene parameters** — spot density, spot intensity, the biological ratio law
-  including its slope β, per-spot ratio scatter, background, PSF width and
-  C1-vs-C2 mismatch, channel registration shift — are randomized **WIDELY** as
-  domain randomization.
-- **β (the ratio-law slope) is varied per image, including β = 0.** If β were
-  fixed, the network would learn it as a prior and bias the very quantity we
-  measure.
-- All bookkeeping is in **photon-proportional units**; observed counts are
-  derived from them. **Per-channel offset is subtracted before any ratio or log
-  is taken**, in both simulation bookkeeping and inference.
-- **Frame averaging is `integration count = 3`** (mean of 3 scans): simulate by
-  **reducing added-noise variance** accordingly, **not** by scaling the signal.
+## Layout
 
-## Intensities & supervision
+```
+configs/            smoke.yaml (tiny, <60s CPU), default.yaml (real sizes)
+src/spotpipe/
+  paths.py          ALL path resolution (SPOTPIPE_ROOT)
+  config.py         typed config loader (dataclasses over yaml)
+  schema/           FROZEN interface (schema.py is the source of truth)
+  simulator/        VENDORED forward model + dataset/benchmark-set generators
+  models/           VENDORED HRNet backbone + heads + inference (+ checkpoints/)
+  losses/           VENDORED detection/localization/intensity losses
+  data/             (empty) dataloader — later build stage
+  benchmark/        (empty) fresh harness — later build stage
+  cli.py            `spotpipe smoke` now; train/bench later
+tests/              test_import, test_schema_roundtrip, test_smoke
+scripts/sync_to_remote.sh   rsync repo + named dataset dir to a remote host
+```
 
-- `logI1`/`logI2` are the per-spot **TOTAL INTEGRATED** intensity (in
-  photon-proportional units), regressed directly by the network as a scalar at
-  each spot center — **NOT** a sum or read of image pixels. The network learns
-  to deblend overlapping spots; a pixel/window readout would be contaminated by
-  neighboring spots, so it is never used.
-- Intensity losses are **masked to ground-truth spot centers**, and the
-  supervision target is each spot's **true integrated photon count from the
-  simulator (pre-detector)**, before spots are summed into the image.
+## Environment
 
-## Uncertainty (part of phase 1, not deferred)
-
-- Per-spot **heteroscedastic uncertainty** is part of phase 1. The intensity
-  heads predict **log-variance per channel**; the loss is a **Gaussian NLL** on
-  `logI1`/`logI2`. These populate the `uncertainty1`/`uncertainty2` schema
-  columns and let the downstream slope fit be uncertainty-weighted.
-- Heavily overlapped / dim spots should come back with **larger** predicted
-  uncertainty.
-
-## No slope loss in phase 1
-
-- The ratio-law slope **β is computed explicitly DOWNSTREAM of inference** from
-  per-spot `logI1`/`logI2` — **never trained on**.
-- An in-batch slope would be a **biased (attenuated)** estimator because the
-  regressor (predicted `logI1`) carries error, and training on it could distort
-  per-spot intensities — exactly the per-spot unbiasedness the project must
-  demonstrate.
-- Slope supervision may be revisited **only after** per-spot estimates are shown
-  unbiased on their own.
-
-## Evaluation & curriculum
-
-- The **validation/evaluation set is FIXED** across the whole training
-  curriculum. The training set difficulty ramps (density, overlap, noise,
-  background), but bias/variance is always measured on the **same held-out set**
-  spanning the **full final difficulty range** — including the **dim ×
-  high-overlap corner** — so curriculum progress never confounds the metric.
-- The curriculum varies **scene difficulty only, never detector constants**.
-- During data generation, the **dim-spot tail and high-overlap regime are
-  over-sampled** relative to uniform, because that is the regime the project's
-  central low-bias / low-variance claim targets.
-
-## Real-data domain adaptation (phase 2, optional)
-
-- Phase 2 is **optional and never part of the phase-1 baseline**. It uses
-  **geometric-transform consistency** (flips / rotations / shifts with
-  inverse-transform agreement) on **unlabeled real images ONLY**.
-- **No photometric/intensity transforms** — demanding intensity-invariance would
-  corrupt the measured quantity (same logic as not randomizing detector gain).
-- Synthetic supervised batches are mixed in throughout.
-
-## Output schema
-
-- Every spot-detection method (our model and external baselines) emits the
-  **canonical schema** in `spotpipe.schema`, identically. All analysis and
-  benchmarking depend on this.
-
-## Build order (staged across prompts — do not jump ahead)
-
-1. Skeleton (this prompt).
-2. Forward model + noise in isolation.
-3. Model + losses + training.
-4. Benchmark harness + method adapters.
-5. Then experiments.
-
-Scientific logic that belongs to a later stage stays as a stub
-(`raise NotImplementedError`) until its stage.
+* Windows dev: `.venv` (Python 3.12, torch CPU). Run tests with
+  `.venv\Scripts\python.exe -m pytest tests/`.
+* Old repo (do not modify): `C:\Users\shivl\Videos\spotpipe` @ `7b9a0b8`.
+* Old A100 artifacts: `C:\Users\shivl\Videos\spotpipe_a100_artifacts`.

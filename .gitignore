@@ -1,65 +1,9 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
-
-# uv / virtualenv
 .venv/
-uv.lock.tmp
-
-# Data & model artifacts (kept out of git; experiments track via config + commit)
-*.pt
-*.pth
-*.npy
-*.npz
-*.h5
-# Generated microscopy TIFFs (raw/photon/detection inputs) are reproducible, never committed.
-*.tif
-*.tiff
-
-# Generated simulator outputs (figures, datasets) live here; reproduce from config
-/outputs/
-
-# External-tool artifacts (Spotiflow/DECODE/...): generated detections, results,
-# fine-tuned model folders, and per-tool venvs are produced/installed locally and
-# reproduced from code+config -- never committed.
-external_models/
-outputs/external/
-.venvs/
-# SpotMAX (and other external-tool) run trees: exported detection TIFFs, generated
-# INIs, SpotMAX output tables, neutral/canonical prediction CSVs, benchmark figures.
-external_runs/
-spotmax_runs/
-SpotMAX_output/
-Position_*/
-
-# Per-experiment outputs (figures, metrics, checkpoints): reproduce from config + commit
-experiments/*/outputs/
-
-# --- Generated benchmark/test datasets -------------------------------------
-# Datasets are reproducible artifacts (seed + config + git commit), NOT source.
-# Generate them ON the GPU instance and verify integrity via the manifest
-# checksums -- never commit them through git. See data/README.md.
-data/benchmark_test_*/
-data/eval/
-data/fixed_eval/
-# Generated data files anywhere under data/ (images, tables, manifests). Docs
-# such as data/README.md (and any *.md) are *.md and stay tracked.
-data/**/*.tif
-data/**/*.tiff
-data/**/*.npy
-data/**/*.npz
-data/**/*.csv
-data/**/*.json
-
-# OS / editor
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-
-# Notebooks
-.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+outputs/
+data/
+# checkpoints are tracked deliberately (small, precious) -- do NOT ignore
+# src/spotpipe/models/checkpoints/

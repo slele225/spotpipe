@@ -1,4 +1,4 @@
-"""FV3000 two-channel forward model.
+﻿"""FV3000 two-channel forward model.
 
 Generates synthetic two-channel confocal images from a *scene* description and a
 *detector* description, in photon-proportional bookkeeping units, then derives

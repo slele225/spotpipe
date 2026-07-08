@@ -1,8 +1,7 @@
-"""spotpipe: two-channel microscopy spot-detection pipeline.
+"""spotpipe: two-channel microscopy spot-detection pipeline (rebuilt repo).
 
-Shared library. The single source of truth for all shared code lives here in
-``src/spotpipe/``. Experiments under ``experiments/`` contain only config,
-a results README, and outputs -- never code. See CLAUDE.md.
+Vendored precious core (simulator / models / losses / schema) + fresh
+disposable layers. See CLAUDE.md for the tier rules.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

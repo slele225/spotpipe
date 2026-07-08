@@ -1,64 +1,38 @@
-# spotpipe
+# spotpipe (rebuilt)
 
-A two-channel microscopy **spot-detection pipeline**. A neural network detects
-diffraction-limited spots in two-channel confocal images and estimates per-spot
-intensities in each channel, so a downstream log-ratio / slope analysis can
-recover a biological relationship. Training is on synthetic data from a forward
-model of an Olympus **FV3000** (analog-integration PMT detector); real-data
-calibration comes later.
+Two-channel microscopy spot-detection pipeline: FV3000 forward-model simulator
++ HRNet spot detector emitting a frozen canonical schema.
 
-> This repo is built in stages. Right now it is the **skeleton only** — most
-> scientific logic is stubbed with `raise NotImplementedError`. See
-> [`CLAUDE.md`](CLAUDE.md) for the durable design rules and the build order.
+This repo was rebuilt from the old repo by vendoring ONLY the precious core —
+simulator, model, losses, schema — pinned at git SHA
+`7b9a0b85ee527afeb73d9e68f9bdb30960775083` (see `VENDORED_NOTES.md`). The
+benchmark harness, dataloader, training loop, and plotting were deliberately
+NOT ported; they are rebuilt fresh in later stages. Read `CLAUDE.md` for the
+tier rules before touching anything.
 
-## The shared-code / isolated-experiment rule
-
-This is the central organizing principle of the repo:
-
-- **Shared code lives only in `src/spotpipe/`.** There is exactly one copy. It is
-  installed editable and imported as `from spotpipe.simulator import ...` from
-  anywhere — never via `sys.path` hacks.
-- **Experiments hold config + a results README + outputs — never code.** An
-  experiment is defined as *"shared code at a pinned git commit + this config."*
-  Because the code is pinned by commit and imported from the installed package,
-  copying code into an experiment folder is never necessary.
-
-To start a new experiment:
-
-```bash
-python scripts/new_experiment.py my-slug
-```
-
-This stamps `experiments/YYYY-MM-DD_my-slug/` with a `config.yaml` (which records
-the current git commit for reproducibility), a `README.md` skeleton
-(Motivation / Config diff from baseline / Results / Decision), and an empty
-`outputs/` directory.
-
-## Layout
+## Quick start (Windows dev)
 
 ```
-src/spotpipe/
-  simulator/   forward_model, noise, psf, backgrounds, generate_dataset   (stubs)
-  models/      backbone, heads, spot_model                                (stubs)
-  losses/      detection, localization, intensity, ratio                  (stubs)
-  training/    train                                                      (stub)
-  benchmark/   harness, adapters, metrics                                 (stubs)
-  utils/       io, matching                                               (stubs)
-  schema.py    canonical spot-output schema                               (implemented)
-experiments/   per-experiment config + README + outputs (no code)
-scripts/
-  new_experiment.py   experiment scaffolder                              (implemented)
-CLAUDE.md      durable design rules
-pyproject.toml uv / src-layout / editable `spotpipe`
+.venv\Scripts\python.exe -m pip install -e . --no-deps   # once
+.venv\Scripts\python.exe -m spotpipe.cli smoke           # or: spotpipe smoke
+.venv\Scripts\python.exe -m pytest tests/
 ```
 
-## Setup
+`spotpipe smoke` generates ~50 tiny synthetic images (configs/smoke.yaml),
+writes ground truth in the canonical schema, runs the vendored model (random
+weights) and writes schema-valid predictions under `outputs/smoke/`. It must
+finish in under 60 s on CPU.
 
-Uses [`uv`](https://docs.astral.sh/uv/) with a src-layout, editable package.
+## Paths
 
-```bash
-uv sync
-```
+All paths resolve through `spotpipe.paths` rooted at the `SPOTPIPE_ROOT` env
+var (default: repo root). Never hardcode an absolute path.
 
-`uv sync` installs `spotpipe` editable, so `from spotpipe.schema import SpotRecord`
-resolves cleanly from anywhere, including a subfolder of `experiments/`.
+## Checkpoints
+
+Two trained checkpoints are carried from the old A100 runs under
+`src/spotpipe/models/checkpoints/{hrnet_large,hrnet_small}/`, each with its
+training `config.yaml`, `manifest.json`, and `PROVENANCE.md` (simulator SHA +
+config + seeds). Full run outputs (all step checkpoints, benchmark results,
+the 328 MB final archive) remain in
+`C:\Users\shivl\Videos\spotpipe_a100_artifacts`.
