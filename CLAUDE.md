@@ -69,3 +69,5 @@ scripts/sync_to_remote.sh   rsync repo + named dataset dir to a remote host
   `.venv\Scripts\python.exe -m pytest tests/`.
 * Old repo (do not modify): `C:\Users\shivl\Videos\spotpipe` @ `7b9a0b8`.
 * Old A100 artifacts: `C:\Users\shivl\Videos\spotpipe_a100_artifacts`.
+
+Alpha/slope convention is frozen in docs/alpha_convention.md; follow it.
