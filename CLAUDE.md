@@ -71,3 +71,5 @@ scripts/sync_to_remote.sh   rsync repo + named dataset dir to a remote host
 * Old A100 artifacts: `C:\Users\shivl\Videos\spotpipe_a100_artifacts`.
 
 Alpha/slope convention is frozen in docs/alpha_convention.md; follow it.
+
+SNR labeling convention is frozen in docs/snr_convention.md; follow it for all benchmark difficulty-axis labeling and any SNR computation, and never substitute a different SNR definition without updating that doc.

@@ -1,0 +1,25 @@
+# Smoke benchmark: tiny counts, must generate in < a few seconds (pipeline test).
+# Reuses smoke.yaml's simulator block (64x64 images, same detector/scene base)
+# by reference -- no duplication, no absolute paths.
+
+base_simulator_config: smoke.yaml   # relative to configs/; its `simulator:` block is used
+
+benchmark:
+  seed: 0
+  image:
+    height: 80
+    width: 80
+  # Full orthogonal grid (SNR bin edges x constant area-density levels in spots/px)
+  # but 1 image per cell. 6 SNR x 5 density = 30 cells. Constant density per cell,
+  # uniform placement, no clustering.
+  snr_edges:      [0, 2, 5, 10, 20, 50, inf]
+  density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015]
+  density_radius_px: 4.0
+  images_per_cell: 2   # >1 so the constant-per-cell area-density invariant is exercised
+
+  # A tiny alpha sweep incl. the null control (still exercises the 2x wiring).
+  # A handful of sparse images per set gives enough spots to span the A1 window.
+  alpha_values: [-0.6, 0.0, 0.6]
+  images_per_alpha: 6
+  null_control_multiplier: 3
+  min_alpha_decades: 1.0

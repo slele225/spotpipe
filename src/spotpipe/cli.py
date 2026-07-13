@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-__all__ = ["main", "run_smoke"]
+__all__ = ["main", "run_smoke", "run_bench_gen", "run_infer"]
 
 
 def run_smoke(config_path: str | Path | None = None, out_dir: str | Path | None = None) -> Path:
@@ -79,16 +79,106 @@ def run_smoke(config_path: str | Path | None = None, out_dir: str | Path | None 
     return out
 
 
+def run_bench_gen(config_path: str | Path | None = None, out_dir: str | Path | None = None) -> Path:
+    """Generate the two-family benchmark image sets + ground truth.
+
+    Generation ONLY: no method runs, no slope is fit, no metric is computed. Writes
+    the portable ``snr_density/`` + ``curvature/`` directory artifact plus
+    ``BENCH_MANIFEST.json``. Returns the benchmark root directory.
+    """
+    from spotpipe.benchmark.generate import generate_benchmark, load_benchmark_config
+    from spotpipe.paths import get_paths
+
+    paths = get_paths()
+    config_path = Path(config_path) if config_path else paths.configs / "benchmark.yaml"
+    base_config, cfg = load_benchmark_config(config_path)
+    # A benchmark set is a portable, syncable directory artifact -> under data/
+    # (moved by scripts/sync_to_remote.sh; CLAUDE.md rule 6), never a machine path.
+    out = Path(out_dir) if out_dir else paths.dataset("benchmark")
+    generate_benchmark(base_config, cfg, out)
+    return out
+
+
+def run_infer(
+    checkpoint: str = "all",
+    benchmark: str | Path | None = None,
+    out: str | Path | None = None,
+    *,
+    device: str = "auto",
+    batch_size: int = 8,
+    num_workers: int | None = None,
+    smoke: bool = False,
+) -> Path:
+    """Run a trained checkpoint (or ``all``) over the benchmark -> prediction CSVs.
+
+    Emits one schema-conforming ``predictions.csv`` per condition per method under
+    ``<out>/<method>/`` plus a ``RUN_MANIFEST.json``. Resumable (skip-if-exists),
+    incremental, and parallel-loaded. Modifies nothing vendored. Returns the
+    results root. See :mod:`spotpipe.benchmark.infer` for the full contract.
+    """
+    from spotpipe.benchmark.infer import run_inference
+    from spotpipe.paths import get_paths
+
+    paths = get_paths()
+    bench_root = Path(benchmark) if benchmark else paths.dataset("benchmark")
+    results_root = Path(out) if out else paths.output("predictions")
+    run_inference(
+        checkpoint,
+        bench_root=bench_root,
+        results_root=results_root,
+        repo_root=paths.root,
+        checkpoints_root=paths.checkpoints,
+        device=device,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        smoke=smoke,
+    )
+    return results_root
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spotpipe")
     sub = parser.add_subparsers(dest="command", required=True)
     smoke = sub.add_parser("smoke", help="tiny end-to-end run: simulate -> forward -> schema CSVs")
     smoke.add_argument("--config", default=None, help="yaml config (default: configs/smoke.yaml)")
     smoke.add_argument("--out", default=None, help="output dir (default: outputs/<split>/)")
+
+    bench = sub.add_parser("bench-gen",
+                           help="generate benchmark image sets + GT (no method / no fit / no metric)")
+    bench.add_argument("--config", default=None,
+                       help="benchmark yaml (default: configs/benchmark.yaml; smoke: configs/benchmark_smoke.yaml)")
+    bench.add_argument("--out", default=None, help="benchmark root dir (default: data/benchmark/)")
+
+    infer = sub.add_parser("infer",
+                           help="run trained checkpoint(s) over the benchmark -> prediction CSVs")
+    infer.add_argument("--checkpoint", default="all",
+                       help="checkpoint name (e.g. hrnet_large) or 'all' for both (default: all)")
+    infer.add_argument("--benchmark", default=None,
+                       help="benchmark root dir (default: data/benchmark/)")
+    infer.add_argument("--out", default=None,
+                       help="results root dir (default: outputs/predictions/)")
+    infer.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"),
+                       help="compute device; 'cuda' aborts if no GPU (default: auto)")
+    infer.add_argument("--batch-size", type=int, default=8, help="forward-pass batch size")
+    infer.add_argument("--num-workers", type=int, default=None,
+                       help="DataLoader workers (default: min(cpu_count, 8))")
+    infer.add_argument("--smoke", action="store_true",
+                       help="tiny subset (few conditions x few images) for a fast correctness check")
+
     args = parser.parse_args(argv)
 
     if args.command == "smoke":
         run_smoke(args.config, args.out)
+        return 0
+    if args.command == "bench-gen":
+        run_bench_gen(args.config, args.out)
+        return 0
+    if args.command == "infer":
+        run_infer(
+            args.checkpoint, args.benchmark, args.out,
+            device=args.device, batch_size=args.batch_size,
+            num_workers=args.num_workers, smoke=args.smoke,
+        )
         return 0
     return 1
 
