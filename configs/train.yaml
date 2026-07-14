@@ -109,7 +109,7 @@ training:
   intensity_window:
     full_decades: 2.0            # dim-tail span (log10 photons) below the ceiling at full difficulty
     full_dim_bias: 1.6           # dim over-sampling at full difficulty (curriculum ramps 1 -> this)
-    floor_a1_photons: 10.0       # keep spots detectable (never solve sub-photon)
+    floor_a1_photons: 3.0        # covers benchmark-v2 dim curvature spots (alpha=+1.2 dips to ~2.9 ph)
     target_frac: 0.85            # brightest spot's clean gained peak <= this * knee (headroom)
     scatter_sigmas: 3.5          # cover the upper tail of the per-spot log-ratio scatter
 

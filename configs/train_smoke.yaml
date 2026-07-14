@@ -76,7 +76,7 @@ training:
   intensity_window:
     full_decades: 2.0
     full_dim_bias: 1.6
-    floor_a1_photons: 10.0
+    floor_a1_photons: 3.0
     target_frac: 0.85
     scatter_sigmas: 3.5
   eval_every: 10

@@ -45,10 +45,14 @@ the old repo (`C:\Users\shivl\Videos\spotpipe`, READ-ONLY) with the departures b
   ported). STOP #2's benchmark-v2 smoke uses the existing `spotpipe infer` adapter.
 
 ## CPU sanity gates (all pass here)
-- **Overfit** (4–8 images, ≤300 steps): loss collapses; `logI1_mae≈0.0005`, `logI2_mae≈0.0006`.
+- **Overfit** (4–8 images, ≤300 steps): loss collapses; `logI{1,2}_mae` ≈ 0.005–0.02
+  (the fixed set now includes ~3-photon spots, which are intrinsically noisier to fit exactly).
 - **Solved-A1 window** @ full difficulty (256×256, 5000 samples): ceiling median **468 ph**
-  (min 14, max 20 792), window median **1.67 decades**, floor 10 ph, **0% degenerate**,
-  protein channel binds **68%**. Ceiling ≪ old impossible 7943 ph max.
+  (max 20 792), window median **2.0 decades**, **floor 3 ph** (dim end reaches exactly 3.0 ph;
+  46% of images cover ≤3.5 ph, 57% ≤8 ph — spanning the benchmark-v2 dim curvature spots
+  2.9–7.9 ph), **0% degenerate**, protein channel binds **68%**. Ceiling ≪ old impossible 7943 ph.
+- **3-photon render**: pinned 3-ph spots render as valid uint16 with finite, non-degenerate
+  logI targets and zero saturation (no all-zero / NaN maps).
 - **Dataload profiling**: the multi-worker loader works (Windows spawn OK). CPU fraction is
   ~1% but not the real gate — **the <20% gate must be re-run on the GPU box** (compute is
   far faster there, so the fraction rises).

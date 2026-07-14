@@ -164,7 +164,7 @@ def solve_a1_ceiling(
     knee2: float,
     target_frac: float = 0.85,
     scatter_sigmas: float = 3.5,
-    floor_a1_photons: float = 10.0,
+    floor_a1_photons: float = 3.0,
 ) -> dict:
     """Solve the widest A1 (log10 photons) that keeps BOTH channels unclipped.
 

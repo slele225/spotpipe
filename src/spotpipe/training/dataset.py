@@ -80,7 +80,7 @@ class IntensityWindowConfig:
 
     full_decades: float = 2.0
     full_dim_bias: float = 1.6
-    floor_a1_photons: float = 10.0
+    floor_a1_photons: float = 3.0
     target_frac: float = 0.85
     scatter_sigmas: float = 3.5
 
@@ -90,7 +90,7 @@ class IntensityWindowConfig:
         return cls(
             full_decades=float(w.get("full_decades", 2.0)),
             full_dim_bias=float(w.get("full_dim_bias", 1.6)),
-            floor_a1_photons=float(w.get("floor_a1_photons", 10.0)),
+            floor_a1_photons=float(w.get("floor_a1_photons", 3.0)),
             target_frac=float(w.get("target_frac", 0.85)),
             scatter_sigmas=float(w.get("scatter_sigmas", 3.5)),
         )
