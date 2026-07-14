@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-__all__ = ["main", "run_smoke", "run_bench_gen", "run_infer"]
+__all__ = ["main", "run_smoke", "run_bench_gen", "run_infer", "run_train"]
 
 
 def run_smoke(config_path: str | Path | None = None, out_dir: str | Path | None = None) -> Path:
@@ -136,6 +136,99 @@ def run_infer(
     return results_root
 
 
+def run_train(
+    config_path: str | Path | None = None,
+    out_dir: str | Path | None = None,
+    *,
+    mode: str = "run",
+    device: str = "auto",
+    steps: int | None = None,
+    num_workers: int | None = None,
+    require_gpu: bool = False,
+    resume: bool = True,
+) -> int:
+    """Train the measured-detector hrnet_large model, or run one of its self-checks.
+
+    ``mode`` is one of: ``run`` (the real staged run; needs ``--out``), ``overfit``
+    (tiny fixed set; loss must collapse), ``smoke`` (short end-to-end loop),
+    ``profile`` (dataload-vs-compute timing gate), ``solved-windows`` (print the
+    CHANGE-2 solved-A1-range distribution). See src/spotpipe/training/train.py.
+    """
+    import json
+
+    import torch
+
+    from spotpipe.paths import get_paths
+    from spotpipe.training.dataset import (
+        DetectorConstants,
+        IntensityWindowConfig,
+        summarize_solved_windows,
+    )
+    from spotpipe.training.train import (
+        load_train_config,
+        overfit,
+        profile_dataload,
+        resolve_blocks,
+        resolve_device,
+        train,
+    )
+
+    paths = get_paths()
+    default = "train_smoke.yaml" if mode in ("overfit", "smoke", "profile") else "train.yaml"
+    config_path = Path(config_path) if config_path else paths.configs / default
+    config = load_train_config(config_path)
+    dev = resolve_device(device)
+    print(f"[train] config={config_path} mode={mode} device={dev} "
+          f"(cuda_available={torch.cuda.is_available()})")
+
+    if mode == "solved-windows":
+        shape, det_cfg, scene_cfg, _ = resolve_blocks(config)
+        consts = DetectorConstants.from_config(det_cfg)
+        wcfg = IntensityWindowConfig.from_config(config.get("training", {}))
+        for t in (0.0, 0.5, 1.0):
+            rep = summarize_solved_windows(scene_cfg, consts, wcfg, shape=shape,
+                                           n_samples=3000, seed=int(config.get("seed", 0)), t=t)
+            print(f"[solved-windows t={t}] " + json.dumps(rep, indent=2))
+        return 0
+
+    if mode == "profile":
+        res = profile_dataload(config, device=device, num_workers=num_workers)
+        print("[profile] " + json.dumps(res, indent=2))
+        return 0 if res["gate_pass"] else 2
+
+    if mode == "overfit":
+        result = overfit(config, steps=steps or 300, device=device)
+        final = result["final_eval"]
+        print(f"[overfit] final logI1_mae={final['logI1_mae']:.4f} "
+              f"logI2_mae={final['logI2_mae']:.4f} "
+              f"loss_total={final.get('loss_total')}")
+        return 0
+
+    if mode == "smoke":
+        result = train(config, device=device, out_dir=out_dir, steps=steps or 20,
+                       num_workers=num_workers if num_workers is not None else 0,
+                       resume=False)
+        print(f"[smoke] trained {steps or 20} steps; dataload_fraction="
+              f"{result['dataload_fraction']:.3f}")
+        return 0
+
+    # Real run.
+    out = out_dir
+    if out is None and config.get("experiment"):
+        out = str(paths.output(f"train/{config['experiment'].get('name', 'run')}"))
+    if out is None:
+        print("[train] a real run needs --out (or an experiment.name in the config)")
+        return 1
+    result = train(config, device=dev, out_dir=out, steps=steps, num_workers=num_workers,
+                   require_gpu=require_gpu, resume=resume)
+    best = result["best"]
+    print(f"[train] done: run_dir={result['run_dir']}  dataload_fraction="
+          f"{result['dataload_fraction']:.3f}")
+    print(f"[train] best: step={best.get('step')} by={best.get('metric')} "
+          f"value={best.get('value')}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="spotpipe")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -165,6 +258,23 @@ def main(argv: list[str] | None = None) -> int:
     infer.add_argument("--smoke", action="store_true",
                        help="tiny subset (few conditions x few images) for a fast correctness check")
 
+    train_p = sub.add_parser("train",
+                             help="train the measured-detector hrnet_large model (or a self-check)")
+    train_p.add_argument("--config", default=None,
+                         help="training yaml (default: configs/train.yaml; self-checks: train_smoke.yaml)")
+    train_p.add_argument("--out", default=None, help="run output dir (default: outputs/train/<name>/)")
+    train_p.add_argument("--mode", default="run",
+                         choices=("run", "overfit", "smoke", "profile", "solved-windows"),
+                         help="run (real staged run) | overfit | smoke | profile | solved-windows")
+    train_p.add_argument("--device", default="auto", help="'auto' | 'cuda' | 'cpu'")
+    train_p.add_argument("--steps", type=int, default=None, help="override the configured step count")
+    train_p.add_argument("--num-workers", type=int, default=None,
+                         help="DataLoader workers (default: cpu_count-2; 0 = inline)")
+    train_p.add_argument("--require-gpu", action="store_true",
+                         help="fail loud if the resolved device is not CUDA (for the GPU box)")
+    train_p.add_argument("--no-resume", action="store_true",
+                         help="ignore any train_state.pt and start fresh")
+
     args = parser.parse_args(argv)
 
     if args.command == "smoke":
@@ -180,6 +290,11 @@ def main(argv: list[str] | None = None) -> int:
             num_workers=args.num_workers, smoke=args.smoke,
         )
         return 0
+    if args.command == "train":
+        return run_train(
+            args.config, args.out, mode=args.mode, device=args.device, steps=args.steps,
+            num_workers=args.num_workers, require_gpu=args.require_gpu, resume=not args.no_resume,
+        )
     return 1
 
 

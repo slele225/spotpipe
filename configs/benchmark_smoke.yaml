@@ -1,21 +1,45 @@
-# Smoke benchmark: tiny counts, must generate in < a few seconds (pipeline test).
-# Reuses smoke.yaml's simulator block (64x64 images, same detector/scene base)
-# by reference -- no duplication, no absolute paths.
+# Smoke benchmark v2: tiny counts, must generate in < a few seconds (pipeline
+# test). Reuses smoke.yaml's simulator block (small images, same scene base) by
+# reference, then OVERRIDES the detector with the MEASURED per-channel constants
+# so smoke exercises the same detector as the full benchmark. No absolute paths.
 
 base_simulator_config: smoke.yaml   # relative to configs/; its `simulator:` block is used
+
+# MEASURED detector (2026-07-13), identical to configs/benchmark.yaml. ch1 = LIPID
+# (561 nm), ch2 = PROTEIN (488 nm) -- pipeline order, OPPOSITE the acquisition order.
+simulator_overrides:
+  detector:
+    n_frames: 3
+    poisson_gaussian_threshold: 20
+    adc_max: 4095
+    jitter_frac: 0.0
+    ch1:   # LIPID, 561 nm, PMT 500 V
+      gain: 6.63
+      offset: 154.0
+      excess_noise_factor: 1.0
+      saturation_knee: 3941.0
+      noise_floor_sigma: 1.760681686165901   # sqrt(3.1 ADU^2)
+    ch2:   # PROTEIN, 488 nm
+      gain: 40.0                       # CHOSEN (planned lower-voltage), NOT measured; measured=124.3
+      offset: 154.0
+      excess_noise_factor: 1.0
+      saturation_knee: 3941.0
+      noise_floor_sigma: 2.0976176963403033  # sqrt(4.4 ADU^2)
 
 benchmark:
   seed: 0
   image:
     height: 80
     width: 80
-  # Full orthogonal grid (SNR bin edges x constant area-density levels in spots/px)
-  # but 1 image per cell. 6 SNR x 5 density = 30 cells. Constant density per cell,
-  # uniform placement, no clustering.
-  snr_edges:      [0, 2, 5, 10, 20, 50, inf]
+  # A tiny SNR x density grid: 6 SNR targets x 5 densities = 30 cells, 2 imgs each.
+  # SNR grid [2,3,5,8,10,15] (same as full benchmark) -- capped below the protein
+  # ADC clip (SNR ~= 16.8 at the chosen gain 40) so no cell clips either channel;
+  # density=0.015 exercises the density-stress flag (above the legacy max).
+  # Constant SNR per cell, constant density per cell, uniform placement, no clustering.
+  snr_targets:    [2, 3, 5, 8, 10, 15]
   density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015]
   density_radius_px: 4.0
-  images_per_cell: 2   # >1 so the constant-per-cell area-density invariant is exercised
+  images_per_cell: 2   # >1 so the constant-per-cell area-density + SNR invariants are exercised
 
   # A tiny alpha sweep incl. the null control (still exercises the 2x wiring).
   # A handful of sparse images per set gives enough spots to span the A1 window.

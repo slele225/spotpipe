@@ -1,0 +1,137 @@
+# Measured-detector hrnet_large retrain -- the REPRODUCIBLE HEADLINE MODEL,
+# replacing the legacy checkpoints (which were trained on a wrong-by-~20x detector
+# and fire hundreds of spurious detections on measured-detector images).
+#
+# This is a TRAINING config for the DISPOSABLE training layer (spotpipe.training).
+# It does NOT edit anything vendored: per-image gain randomisation and per-image
+# intensity solving are done in a new driver composing the frozen simulator
+# primitives (see src/spotpipe/training/intensity_window.py + dataset.py).
+#
+# CHANNEL MAPPING: ch1 = LIPID (561 nm), ch2 = PROTEIN (488 nm) -- pipeline order,
+# OPPOSITE the acquisition order. A swap inverts A2/A1 and destroys alpha.
+
+experiment:
+  name: measured-detector-hrnet-large
+  note: >
+    Measured-detector retrain. Gains RANDOMISED per image (CHANGE 1) for robustness
+    to a future PMT-voltage change; intensity range SOLVED per image so no spot clips
+    either channel (CHANGE 2); realistic constant ~2-photon background (CHANGE 3).
+
+seed: 0
+
+model:                    # == hrnet_large checkpoint (~1.53M params). Do not change.
+  in_channels: 2
+  base_channels: 32
+  num_branches: 3
+  blocks_per_branch: 2
+  head_mid_channels: 32
+  heatmap_bias: -2.19
+
+simulator:
+  image:
+    height: 256
+    width: 256
+
+  # DETECTOR -- measured 2026-07-13 (gain from photon-transfer curve; offset + read
+  # variance from dark frames). CHANGE 1: only the GAIN is randomised per image, per
+  # channel, independently (so the gain RATIO also varies). Everything else is HELD
+  # at the measured value. saturation_knee = adc_max - offset (soft-knee asymptote at
+  # the hard 12-bit clip; benchmark-v2 precedent). excess_noise_factor = 1.0 because
+  # the variance-matching gains already fold in PMT excess. read_var is ADU^2
+  # (noise_floor_sigma = sqrt).
+  detector:
+    n_frames: 3
+    poisson_gaussian_threshold: 20
+    adc_max: 4095
+    ch1:                  # LIPID, 561 nm, PMT 500 V (measured gain 6.63)
+      gain_range: [3, 30]
+      offset: 154.0
+      read_var: 3.1
+      saturation_knee: 3941.0
+      excess_noise_factor: 1.0
+    ch2:                  # PROTEIN, 488 nm, PMT 750 V (measured gain 124.3)
+      gain_range: [20, 150]
+      offset: 154.0
+      read_var: 4.4
+      saturation_knee: 3941.0
+      excess_noise_factor: 1.0
+
+  # SCENE -- domain randomisation per image (CHANGE 3). NOTE: the intensity RANGE is
+  # NOT set here -- it is solved per image from the sampled gains (CHANGE 2, see
+  # training.intensity_window below). Background is the realistic near-zero, stable
+  # photon background (an ASSUMPTION, not a measurement); the old wide [2,25] range
+  # and the gradient/structure terms are removed.
+  scene:
+    density:
+      min: 0.0006
+      max: 0.012
+    oversample_dense_fraction: 0.3
+    ratio_law:
+      alpha:       {min: -0.7, max: 0.7}     # sim_intercept
+      beta:        {min: -0.6, max: 0.6}     # sim_log_slope -> physical alpha in [-1.2, 1.2]
+      scatter_std: {min: 0.03, max: 0.25}
+    psf:
+      sigma1:            {min: 1.0, max: 1.8}
+      c2_sigma_mismatch: {min: 1.05, max: 1.35}
+    registration_shift:
+      max_px: 1.0
+    background:                              # realistic ~2 photons, small jitter; flat only
+      level:          {min: 1.0, max: 4.0}
+      gradient_frac:  {min: 0.0, max: 0.0}
+      structure_frac: {min: 0.0, max: 0.0}
+    clustering:
+      cluster_prob: 0.4
+      n_clusters:       {min: 2, max: 8}
+      cluster_sigma_px: {min: 6.0, max: 24.0}
+
+training:
+  train_steps: 40000
+  batch_size: 16
+  lr: 0.002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  heatmap_sigma: 1.5
+
+  # Staged schedule -- ORDER MUST HOLD: LR warmup < variance warmup < curriculum full.
+  lr_warmup_steps: 1500          # ramp LR up (full LR on random weights destabilises)
+  variance_warmup_steps: 4000    # fit intensity mean first; then the logvar NLL comes online
+  curriculum:
+    enabled: true
+    curriculum_ramp_steps: 20000 # ramp dim x high-overlap difficulty, then HOLD
+
+  logvar_min: -10.0
+  logvar_max: 6.0
+  loss_weights: {heatmap: 1.0, offset: 1.0, intensity: 1.0}
+
+  # CHANGE 2 -- per-image saturation-safe intensity window. The ceiling (log10_max) is
+  # solved per image from the sampled gains + PSF + ratio law so no spot clips either
+  # channel; the curriculum ramps the dim tail below it (bright-only -> full span).
+  intensity_window:
+    full_decades: 2.0            # dim-tail span (log10 photons) below the ceiling at full difficulty
+    full_dim_bias: 1.6           # dim over-sampling at full difficulty (curriculum ramps 1 -> this)
+    floor_a1_photons: 10.0       # keep spots detectable (never solve sub-photon)
+    target_frac: 0.85            # brightest spot's clean gained peak <= this * knee (headroom)
+    scatter_sigmas: 3.5          # cover the upper tail of the per-spot log-ratio scatter
+
+  eval_every: 1000
+  checkpoint_every: 1000
+  log_every: 100
+  best_checkpoint:
+    enabled: true
+    metric: val_logratio_mae
+    hard_corner_min_pairs: 50
+  val:
+    seed: 12345
+    n_images: 24
+    n_hard_corner: 10
+
+benchmark:                       # inference + hard-corner definition (shared evaluator)
+  match_radius_px: 3.0
+  match_method: greedy
+  snr_bins:     [0.0, 2.0, 5.0, 10.0, 20.0, 50.0, .inf]
+  density_bins: [0.0, 1.0, 3.0, 6.0, .inf]
+  density_radius_px: 4.0
+  our_model:
+    peak_threshold: 0.3
+    nms_kernel: 3
+    max_spots: 2000

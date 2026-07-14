@@ -54,7 +54,11 @@ def test_snr_density_cell_reloads_and_is_schema_valid(smoke_bench):
 
     assert meta["family"] == "snr_density"
     assert meta["n_images"] == cfg.images_per_cell
-    assert meta["true_alpha"] == 0.0  # neutral ratio law
+    assert meta["true_alpha"] == 0.0  # neutral zero-scatter ratio law
+    # TRUE constant-SNR: target recorded, intensity solved, ch1 == ch2.
+    assert meta["target_snr"] == pytest.approx(5.0)
+    assert meta["solved_intensity_photons"] > 0
+    assert meta["solved_A1_photons"] == meta["solved_A2_photons"]
     # density axis is a constant area density in spots/px, used as the label.
     assert meta["area_density_spots_per_px"] == pytest.approx(0.006)
     assert meta["condition"]["area_density_spots_per_px"] == pytest.approx(0.006)
@@ -77,7 +81,7 @@ def test_snr_density_cell_reloads_and_is_schema_valid(smoke_bench):
 
 def test_snr_density_grid_is_complete(smoke_bench):
     out, manifest, cfg = smoke_bench
-    n_snr = len(cfg.snr_edges) - 1
+    n_snr = len(cfg.snr_targets)
     n_cells = n_snr * len(cfg.density_levels)
     assert manifest["families"]["snr_density"]["n_cells"] == n_cells
     assert len(list((out / "snr_density").glob("snr=*_density=*"))) == n_cells
@@ -86,11 +90,56 @@ def test_snr_density_grid_is_complete(smoke_bench):
 def test_snr_density_grid_is_orthogonal(smoke_bench):
     # Every density level appears at every SNR level (full SNR x density grid).
     out, _manifest, cfg = smoke_bench
-    n_snr = len(cfg.snr_edges) - 1
+    n_snr = len(cfg.snr_targets)
     got = {(c["snr_index"], c["area_density_spots_per_px"])
            for c in _manifest_cells(out)}
     expected = {(si, float(d)) for si in range(n_snr) for d in cfg.density_levels}
     assert got == expected
+
+
+def test_snr_density_is_true_constant_snr(smoke_bench):
+    # Change 4: within a cell every spot has identical SNR (~zero spread) and the
+    # realised SNR equals the target. Intensity is solved by inversion, no jitter.
+    out, _manifest, _cfg = smoke_bench
+    for meta_path in (out / "snr_density").glob("snr=*_density=*/meta.json"):
+        meta = json.loads(meta_path.read_text())
+        target = meta["target_snr"]
+        assert meta["realised_snr_spread"] == pytest.approx(0.0, abs=1e-6)
+        rs = meta["realised_snr"]
+        if rs["n"]:
+            assert rs["min"] == pytest.approx(target, rel=1e-6, abs=1e-6)
+            assert rs["max"] == pytest.approx(target, rel=1e-6, abs=1e-6)
+        # ch2 (protein) is the limiting channel at this fixed PSF / background.
+        assert meta["limiting_channel"] in (1, 2)
+
+
+def test_snr_density_solved_intensity_table_and_no_clip(smoke_bench):
+    # Change 6 + decision 1: manifest carries the solved-intensity-per-SNR-cell
+    # table, every cell is UNCLIPPED (positive ADC headroom, both channels), and
+    # the capped grid stays within the legacy training range (no OOD flags).
+    out, manifest, cfg = smoke_bench
+    table = manifest["solved_intensity_table"]
+    assert {row["target_snr"] for row in table} == {float(s) for s in cfg.snr_targets}
+    for row in table:
+        A = row["solved_intensity_photons"]
+        # capped grid [2,3,5,8]: unclipped on both channels, in the legacy range.
+        assert row["ch1_saturates"] is False and row["ch2_saturates"] is False
+        assert row["ch1_headroom_adu"] > 0 and row["ch2_headroom_adu"] > 0
+        assert row["in_legacy_training_distribution"] is (20.0 <= A <= 7943.0)
+        assert row["flag"] is None
+        assert row["ch1_saturates"] is False
+
+
+def test_snr_density_clipping_target_fails_loud():
+    # Decision 1: a target that would clip a channel must FAIL generation, not ship.
+    base_config, _ = load_benchmark_config(get_paths().configs / "benchmark_smoke.yaml")
+    cfg = BenchmarkConfig(seed=1, height=32, width=32, images_per_cell=1,
+                          snr_targets=(50.0,), density_levels=(0.001,),
+                          alpha_values=(0.0,), images_per_alpha=1, null_control_multiplier=1)
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        with pytest.raises(ValueError, match="CLIPS a channel"):
+            generate_benchmark(base_config, cfg, td, log_fn=lambda *_: None)
 
 
 def _manifest_cells(out):
@@ -177,7 +226,7 @@ def test_regeneration_is_deterministic(tmp_path):
     generate_benchmark(base_config, cfg, a, log_fn=lambda *_: None)
     generate_benchmark(base_config, cfg, b, log_fn=lambda *_: None)
 
-    for sub in ("snr_density/snr=0_density=0.0006/ground_truth",
+    for sub in ("snr_density/snr=2_density=0.0006/ground_truth",
                 "curvature/alpha=0.6/ground_truth"):
         fa = sorted((a / sub).glob("gt_*.csv"))
         fb = sorted((b / sub).glob("gt_*.csv"))

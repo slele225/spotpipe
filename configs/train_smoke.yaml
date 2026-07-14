@@ -1,0 +1,103 @@
+# Smoke training config: tiny sizes for the fast CPU self-checks (overfit / smoke /
+# profile). Same measured-detector distribution as configs/train.yaml, shrunk. NO
+# long run uses this. (CLAUDE.md rule 5: the smoke config must pass before any long run.)
+
+experiment:
+  name: measured-detector-hrnet-large-smoke
+
+seed: 0
+
+model:
+  in_channels: 2
+  base_channels: 16          # smaller backbone for a fast CPU smoke
+  num_branches: 2
+  blocks_per_branch: 1
+  head_mid_channels: 16
+  heatmap_bias: -2.19
+
+simulator:
+  image:
+    height: 64
+    width: 64
+  detector:
+    n_frames: 3
+    poisson_gaussian_threshold: 20
+    adc_max: 4095
+    ch1:
+      gain_range: [3, 30]
+      offset: 154.0
+      read_var: 3.1
+      saturation_knee: 3941.0
+      excess_noise_factor: 1.0
+    ch2:
+      gain_range: [20, 150]
+      offset: 154.0
+      read_var: 4.4
+      saturation_knee: 3941.0
+      excess_noise_factor: 1.0
+  scene:
+    density:
+      min: 0.0006
+      max: 0.008
+    oversample_dense_fraction: 0.3
+    ratio_law:
+      alpha:       {min: -0.7, max: 0.7}
+      beta:        {min: -0.6, max: 0.6}
+      scatter_std: {min: 0.03, max: 0.25}
+    psf:
+      sigma1:            {min: 1.0, max: 1.8}
+      c2_sigma_mismatch: {min: 1.05, max: 1.35}
+    registration_shift:
+      max_px: 1.0
+    background:
+      level:          {min: 1.0, max: 4.0}
+      gradient_frac:  {min: 0.0, max: 0.0}
+      structure_frac: {min: 0.0, max: 0.0}
+    clustering:
+      cluster_prob: 0.4
+      n_clusters:       {min: 2, max: 8}
+      cluster_sigma_px: {min: 6.0, max: 24.0}
+
+training:
+  train_steps: 20
+  batch_size: 4
+  lr: 0.002
+  weight_decay: 0.0001
+  grad_clip_norm: 1.0
+  heatmap_sigma: 1.5
+  lr_warmup_steps: 3
+  variance_warmup_steps: 6
+  curriculum:
+    enabled: true
+    curriculum_ramp_steps: 10
+  logvar_min: -10.0
+  logvar_max: 6.0
+  loss_weights: {heatmap: 1.0, offset: 1.0, intensity: 1.0}
+  intensity_window:
+    full_decades: 2.0
+    full_dim_bias: 1.6
+    floor_a1_photons: 10.0
+    target_frac: 0.85
+    scatter_sigmas: 3.5
+  eval_every: 10
+  checkpoint_every: 10
+  log_every: 5
+  best_checkpoint:
+    enabled: true
+    metric: val_logratio_mae
+    hard_corner_min_pairs: 5
+  val:
+    seed: 12345
+    n_images: 8
+    n_hard_corner: 3
+
+benchmark:
+  match_radius_px: 3.0
+  match_method: greedy
+  snr_bins:     [0.0, 2.0, 5.0, 10.0, 20.0, 50.0, .inf]
+  density_bins: [0.0, 1.0, 3.0, 6.0, .inf]
+  density_radius_px: 4.0
+  our_model:
+    peak_threshold: 0.3
+    nms_kernel: 3
+    max_spots: 2000

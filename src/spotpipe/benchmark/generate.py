@@ -15,12 +15,12 @@ deep-merged onto a base scene, ratio-law parameters PINNED per set via
 Layout (under ``bench_root``)::
 
     snr_density/
-      snr={S}_density={D}/          one homogeneous CONDITION per cell; S = SNR bin
-                                    lower edge, D = constant area density (spots/px)
+      snr={S}_density={D}/          one homogeneous CONDITION per cell; S = TRUE
+                                    constant target SNR, D = constant area density (spots/px)
         images/ image_<id>.tif      raw observed counts, uint16 [2,H,W] stack
         ground_truth/ gt_<id>.csv   frozen-schema GT: x,y + true logI1/logI2/I1/I2
-        meta.json                   label (S,D), per-image sigma1/sigma2, realised
-                                    SNR/density stats, n_images, seed
+        meta.json                   label (S,D), fixed sigma1/sigma2, solved intensity,
+                                    realised SNR stats (~zero spread), n_images, seed
     curvature/
       alpha={A}/
         images/ ...
@@ -31,11 +31,15 @@ Layout (under ``bench_root``)::
 
 Two conventions worth stating up front (both recorded in every ``meta.json``):
 
-* A cell is a *nominal target condition*, not a per-spot guarantee. Family 1 keeps
-  a deliberately WIDE per-spot intensity draw (needed to see intensity-dependent
-  bias), so a cell labelled ``snr=5`` contains a spread of per-spot SNR around
-  that level. The frozen ``_features`` SNR/density definitions are applied to the
-  realised spots and their distribution is recorded, so the labelling is honest.
+* Family 1 cells are TRUE constant-SNR conditions (v2): given the FIXED PSF, the
+  CONSTANT background and the MEASURED detector, the single spot intensity is
+  SOLVED by inverting the frozen ``_features`` SNR so ``min(snr1, snr2) ==
+  target``, and every spot gets that same intensity (no jitter). The realised
+  per-spot SNR therefore has ~zero spread and equals the target. Targets are
+  chosen so NO cell clips either channel's ADC (asserted at generation); a solved
+  intensity outside the LEGACY checkpoints' training range is flagged (a
+  measured-detector retrain is in progress -- see the manifest retrain note).
+  (Family 2, the curvature family, deliberately KEEPS a wide A1 spread -- below.)
 * ``ground_truth_sigma`` (true per-image, per-channel PSF width) is plumbed from
   ``meta['ground_truth_sigma']`` into every image's record -- the schema's
   ``sigma*_hat`` columns mean "model estimate" and stay NaN for GT.
@@ -58,6 +62,7 @@ from spotpipe.benchmark.alpha import alpha_to_sim_slope, sim_slope_to_alpha
 from spotpipe.schema import SCHEMA_COLUMNS, write_spots
 from spotpipe.simulator import forward_model, noise, psf
 from spotpipe.simulator._features import (
+    DetectorAxisParams,
     axis_params_from_meta,
     local_neighbor_count,
     peak_snr,
@@ -130,38 +135,46 @@ def _config_hash(config: dict) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Family 1 -- SNR x density scene-override ladders                             #
+# Benchmark-wide FIXED measurement constants (v2)                              #
 # --------------------------------------------------------------------------- #
-# Each SNR bin is a *condition* aimed at populating that half-open bin. Because
-# per-spot peak SNR is peak = A/(2*pi*sigma^2) over a noise floor, the ONLY way to
-# move the SNR level while keeping a wide intensity draw is to shift a wide
-# intensity window's centre (brighter -> higher SNR) and lean on background / PSF
-# at the extremes. Windows stay ~1.6 decades wide so each cell still spans a real
-# intensity range (that is the "keep the natural wide A1 draw" requirement -- a
-# range, not a fixed value). Ratio law is pinned neutral for the whole family.
-_SNR_LADDER: list[dict] = [
-    # bin 0  [0, 2):  very dim + high background + wide PSF  -> lowest SNR
-    {"intensity": {"log10_min": 0.8, "log10_max": 2.2, "dim_bias": 1.6},
-     "background": {"level": {"min": 18.0, "max": 30.0}},
-     "psf": {"sigma1": {"min": 1.4, "max": 1.8}}},
-    # bin 1  [2, 5):  dim + mid background
-    {"intensity": {"log10_min": 1.3, "log10_max": 2.8, "dim_bias": 1.6},
-     "background": {"level": {"min": 8.0, "max": 16.0}}},
-    # bin 2  [5, 10): mid intensity + mid-low background
-    {"intensity": {"log10_min": 1.8, "log10_max": 3.2, "dim_bias": 1.5},
-     "background": {"level": {"min": 4.0, "max": 9.0}}},
-    # bin 3  [10, 20): mid-bright + low background
-    {"intensity": {"log10_min": 2.3, "log10_max": 3.6, "dim_bias": 1.3},
-     "background": {"level": {"min": 2.0, "max": 5.0}}},
-    # bin 4  [20, 50): bright + low background + slightly narrow PSF
-    {"intensity": {"log10_min": 2.9, "log10_max": 4.0, "dim_bias": 1.1},
-     "background": {"level": {"min": 1.5, "max": 3.0}},
-     "psf": {"sigma1": {"min": 1.0, "max": 1.3}}},
-    # bin 5  [50, inf): very bright + lowest background + narrow PSF -> highest SNR
-    {"intensity": {"log10_min": 3.4, "log10_max": 4.3, "dim_bias": 0.9},
-     "background": {"level": {"min": 1.0, "max": 2.5}},
-     "psf": {"sigma1": {"min": 1.0, "max": 1.15}}},
-]
+# A benchmark is a CONTROLLED measurement, not domain randomisation: the PSF, the
+# background and (family 1) the per-spot SNR are PINNED, not drawn. These are the
+# frozen benchmark constants; the measured per-channel detector gain / offset /
+# read variance come from the config (configs/benchmark*.yaml simulator_overrides).
+_BENCH_SIGMA1: float = 1.4              # lipid   (ch1) PSF sigma, px -- FIXED everywhere
+_BENCH_SIGMA2: float = 1.68            # protein (ch2) PSF sigma, px -- FIXED everywhere
+_BENCH_C2_MISMATCH: float = _BENCH_SIGMA2 / _BENCH_SIGMA1   # 1.2 exactly (sigma2 = 1.2 * sigma1)
+_BENCH_BACKGROUND_PHOTONS: float = 2.0  # flat photon background, CONSTANT, both channels
+
+# LEGACY-checkpoint training coverage (docs/training_distribution.md). A solved
+# family-1 intensity or a curvature A1 outside this range is out-of-range for the
+# LEGACY checkpoints (a coverage artifact, not a method difference) and is
+# FLAGGED, never shipped silently. Density above the legacy max is a STRESS cell.
+# NB: a measured-detector RETRAIN is in progress -- its per-image intensity range
+# is solved to keep both channels unclipped, so this legacy range will be replaced
+# by the retrained model's actual training range (see manifest retrain note).
+_LEGACY_A1_MIN: float = 20.0            # ~ 10**1.3 photons (legacy checkpoints)
+_LEGACY_A1_MAX: float = 7943.0         # ~ 10**3.9 photons (legacy checkpoints)
+_LEGACY_DENSITY_MAX: float = 0.012     # spots/px (legacy log-uniform training max)
+_RETRAIN_NOTE: str = (
+    "Ranges compared against are the LEGACY checkpoints' training distribution. A "
+    "measured-detector RETRAIN is in progress (per-image intensity solved to keep "
+    "both channels unclipped); update these comparisons against the retrained "
+    "model's actual training range once it lands.")
+
+# Fixed-PSF and constant-background scene overrides, applied to EVERY set in BOTH
+# families (Change 2 + Change 3). No per-image sigma or background randomisation
+# anywhere in the benchmark -- classical baselines take a FIXED detection sigma,
+# and a benchmark measures rather than randomises. gradient == structure == 0.
+_FIXED_PSF: dict = {
+    "psf": {"sigma1": {"min": _BENCH_SIGMA1, "max": _BENCH_SIGMA1},
+            "c2_sigma_mismatch": {"min": _BENCH_C2_MISMATCH, "max": _BENCH_C2_MISMATCH}},
+}
+_CONSTANT_BACKGROUND: dict = {
+    "background": {"level": {"min": _BENCH_BACKGROUND_PHOTONS, "max": _BENCH_BACKGROUND_PHOTONS},
+                   "gradient_frac": {"min": 0.0, "max": 0.0},
+                   "structure_frac": {"min": 0.0, "max": 0.0}},
+}
 
 # Density axis = CONSTANT AREA DENSITY (spots per pixel), set at generation and
 # used as BOTH the knob and the cell label -- no neighbour-count labels, no
@@ -188,16 +201,157 @@ def _constant_density_override(density_spots_per_px: float) -> dict:
         "clustering": {"cluster_prob": 0.0},
     }
 
-# Neutral ratio law for the WHOLE snr_density family: pin sim_intercept = 0 and
-# sim_log_slope = 0 (the simulator's alpha / beta config fields), so this family
-# isolates difficulty and carries no curvature (true_alpha == 0 everywhere).
+# Neutral, ZERO-SCATTER ratio law for the WHOLE snr_density family: pin
+# sim_intercept = 0, sim_log_slope = 0 AND scatter_std = 0 (the simulator's
+# alpha / beta / scatter config fields). With all three zero the ratio law is
+# log A2 = log A1 exactly (A2 == A1, no per-spot jitter), so every spot in a cell
+# shares one intensity -> one peak -> one SNR (Change 4). The family isolates
+# difficulty and carries no curvature (true_alpha == 0 everywhere).
 _NEUTRAL_RATIO_LAW = {
     "ratio_law": {
-        "alpha": {"min": 0.0, "max": 0.0},   # sim_intercept = 0
-        "beta": {"min": 0.0, "max": 0.0},     # sim_log_slope  = 0  -> true_alpha = 0
-        "scatter_std": {"min": 0.08, "max": 0.08},
+        "alpha": {"min": 0.0, "max": 0.0},          # sim_intercept = 0
+        "beta": {"min": 0.0, "max": 0.0},           # sim_log_slope = 0 -> true_alpha = 0
+        "scatter_std": {"min": 0.0, "max": 0.0},    # NO jitter -> A2 == A1 exactly
     }
 }
+
+
+# --------------------------------------------------------------------------- #
+# Family 1 -- TRUE constant-SNR: invert the frozen SNR to solve for intensity  #
+# --------------------------------------------------------------------------- #
+def _bench_axis_params(base_config: dict) -> DetectorAxisParams:
+    """The frozen ``_features`` SNR-axis params at the FIXED benchmark point.
+
+    Uses the benchmark's fixed PSF (``sigma1``/``sigma2``), the constant flat
+    background, and the MEASURED per-channel gain / read-noise floor / ``n_frames``
+    from the (already override-merged) base config detector block. This is exactly
+    the vendored ``peak_snr`` configuration, so solving against it inverts the
+    SAME SNR the downstream evaluator reports (see ``docs/snr_convention.md``).
+    """
+    det = base_config.get("detector", {})
+    ch1, ch2 = det.get("ch1", {}), det.get("ch2", {})
+    return DetectorAxisParams(
+        sigma1=_BENCH_SIGMA1, sigma2=_BENCH_SIGMA2,
+        bg1=_BENCH_BACKGROUND_PHOTONS, bg2=_BENCH_BACKGROUND_PHOTONS,
+        gain1=float(ch1.get("gain", 1.0)), gain2=float(ch2.get("gain", 1.0)),
+        floor1=float(ch1.get("noise_floor_sigma", 0.0)),
+        floor2=float(ch2.get("noise_floor_sigma", 0.0)),
+        n_frames=int(det.get("n_frames", 3)),
+    )
+
+
+def _solve_intensity_for_snr(target_snr: float, axis: DetectorAxisParams) -> dict:
+    """Solve for the single spot intensity ``A`` whose limiting-channel SNR == target.
+
+    Family 1 pins a neutral, zero-scatter ratio law, so ``A2 == A1 == A`` exactly
+    for every spot and the per-spot scalar SNR is ``min(snr1(A), snr2(A))`` under
+    the frozen ``_features`` definition. That composite is strictly increasing in
+    ``A``, so bisection in ``log A`` recovers the unique intensity (Change 4). No
+    closed form is assumed -- ``min()`` over two channels rarely has one -- so we
+    solve numerically. Returns the solved ``A`` (photons), the per-channel SNRs at
+    ``A``, and which channel limits.
+    """
+    if target_snr <= 0:
+        raise ValueError(f"target SNR must be positive, got {target_snr}")
+
+    def _snr(A: float) -> float:
+        la = math.log(A)
+        r = peak_snr(np.array([la]), np.array([la]), axis)
+        return float(r["snr"][0])
+
+    lo, hi = 1e-3, 1e3
+    while _snr(hi) < target_snr:
+        hi *= 10.0
+        if hi > 1e18:
+            raise RuntimeError(f"SNR target {target_snr} unreachable below A=1e18 photons")
+    for _ in range(200):
+        mid = math.sqrt(lo * hi)
+        if _snr(mid) < target_snr:
+            lo = mid
+        else:
+            hi = mid
+        if hi / lo < 1.0 + 1e-13:
+            break
+    A = math.sqrt(lo * hi)
+    la = math.log(A)
+    r = peak_snr(np.array([la]), np.array([la]), axis)
+    snr1, snr2 = float(r["snr1"][0]), float(r["snr2"][0])
+    return {
+        "intensity": float(A),
+        "snr1": snr1,
+        "snr2": snr2,
+        "limiting_channel": (1 if snr1 <= snr2 else 2),
+        "realised_snr": float(min(snr1, snr2)),
+    }
+
+
+def _channel_saturates(A: float, gain: float, knee: float, peak_fraction: float) -> tuple[bool, float]:
+    """Does a spot of intensity ``A`` reach a channel's saturation knee?
+
+    Mirrors the vendored ``simulate_image`` saturation flag: gained peak
+    ``M = gain * (A * peak_fraction + background)`` and the spot saturates when
+    ``M >= knee``. Returns ``(saturates, gained_peak_ADU)``.
+    """
+    gained_peak = gain * (A * peak_fraction + _BENCH_BACKGROUND_PHOTONS)
+    return bool(gained_peak >= knee), float(gained_peak)
+
+
+def _build_solved_intensity_table(base_config: dict, snr_targets) -> list[dict]:
+    """One row per SNR target: target -> solved A (per channel) + OOD/saturation (Change 6).
+
+    Because family 1 pins ``A2 == A1 == A``, the solved intensity is identical in
+    both channels; both are reported for clarity. A row whose solved ``A`` falls
+    outside the trained ``[20, 7943]`` photon range is flagged OUT-OF-DISTRIBUTION.
+
+    We ALSO flag whether the solved spot saturates each channel's 12-bit ADC. This
+    matters because of the protein (ch2) gain: the ch2 peak pixel reaches the ADC
+    ceiling at a finite SNR (~16.8 at the chosen gain 40), so any SNR target above
+    that yields a CLIPPED protein image even when the intensity is in-distribution.
+    """
+    axis = _bench_axis_params(base_config)
+    det = base_config.get("detector", {})
+    ch1, ch2 = det.get("ch1", {}), det.get("ch2", {})
+    gain1, gain2 = float(ch1.get("gain", 1.0)), float(ch2.get("gain", 1.0))
+    knee1 = float(ch1.get("saturation_knee", math.inf))
+    knee2 = float(ch2.get("saturation_knee", math.inf))
+    pf1, pf2 = psf.gaussian_peak_fraction(_BENCH_SIGMA1), psf.gaussian_peak_fraction(_BENCH_SIGMA2)
+
+    table: list[dict] = []
+    for target in snr_targets:
+        solved = _solve_intensity_for_snr(float(target), axis)
+        A = solved["intensity"]
+        in_dist = _LEGACY_A1_MIN <= A <= _LEGACY_A1_MAX
+        sat1, gp1 = _channel_saturates(A, gain1, knee1, pf1)
+        sat2, gp2 = _channel_saturates(A, gain2, knee2, pf2)
+        flags = []
+        if not in_dist:
+            flags.append(f"solved A={A:.1f} photons is out-of-range for the LEGACY checkpoints "
+                         f"(legacy-trained [{_LEGACY_A1_MIN:g}, {_LEGACY_A1_MAX:g}]; retrain pending)")
+        if sat2:
+            flags.append(f"protein (ch2) SATURATES: gained peak {gp2:.0f} >= knee {knee2:g} ADU "
+                         f"-> clipped protein image")
+        if sat1:
+            flags.append(f"lipid (ch1) SATURATES: gained peak {gp1:.0f} >= knee {knee1:g} ADU")
+        table.append({
+            "target_snr": float(target),
+            "solved_intensity_photons": A,
+            "solved_A1_photons": A,          # ch1 == ch2 (neutral zero-scatter ratio law)
+            "solved_A2_photons": A,
+            "snr1_at_A": solved["snr1"],
+            "snr2_at_A": solved["snr2"],
+            "limiting_channel": solved["limiting_channel"],
+            "in_legacy_training_distribution": bool(in_dist),
+            "ch1_gained_peak_adu": gp1,
+            "ch2_gained_peak_adu": gp2,
+            # Headroom to the ADC ceiling: how far the peak pixel sits below the knee
+            # (positive == unclipped). ch2 (protein) is the binding channel.
+            "ch1_headroom_adu": float(knee1 - gp1),
+            "ch2_headroom_adu": float(knee2 - gp2),
+            "ch1_saturates": sat1,
+            "ch2_saturates": sat2,
+            "flag": ("; ".join(flags) if flags else None),
+        })
+    return table
 
 
 # --------------------------------------------------------------------------- #
@@ -227,17 +381,16 @@ _CURV_SAT_WARN_FRAC = 0.01             # warn if a set's saturated fraction exce
 _CURVATURE_OPERATING_POINT = {
     # NB: no "intensity" here -- the A1 window is computed per set for saturation
     # safety (see _curvature_intensity_window) and merged in by the family driver.
-    "background": {"level": {"min": 1.5, "max": 3.0},
-                   "gradient_frac": {"min": 0.0, "max": 0.15},
-                   "structure_frac": {"min": 0.0, "max": 0.15}},
-    "psf": {"sigma1": {"min": 1.1, "max": 1.4}, "c2_sigma_mismatch": {"min": 1.05, "max": 1.2}},
+    # Adopts the benchmark-wide constants (Change 5): FIXED PSF (sigma1=1.4,
+    # sigma2=1.68) and CONSTANT 2-photon background (gradient == structure == 0),
+    # merged in via _FIXED_PSF / _CONSTANT_BACKGROUND by the family driver.
     "density": {"min": 0.0004, "max": 0.0015}, "oversample_dense_fraction": 0.0,
     "clustering": {"cluster_prob": 0.0},
 }
 
 
 def _curvature_intensity_window(
-    base_config: dict, operating_point: dict, sim_log_slope: float, min_alpha_decades: float,
+    base_config: dict, sim_log_slope: float, min_alpha_decades: float,
 ) -> dict:
     """A1 intensity window (log10 photons) sized to avoid ch1/ch2 saturation.
 
@@ -245,8 +398,10 @@ def _curvature_intensity_window(
     ``_CURV_SAT_TARGET_FRAC`` of each channel's saturation knee, then places a
     fixed-width window below it. ch1 sees A1 directly; ch2 sees
     ``A2 = A1**(1 + sim_log_slope)`` (intercept 0) times the upper scatter tail,
-    so for steep +slope ch2 binds and the ceiling drops. Worst case uses the
-    SMALLEST PSF sigma (highest peak fraction) and the LARGEST flat background.
+    so for steep +slope ch2 binds and the ceiling drops. Uses the benchmark's
+    FIXED PSF (``_BENCH_SIGMA1``/``_BENCH_SIGMA2``) and CONSTANT background
+    (``_BENCH_BACKGROUND_PHOTONS``) -- there is no per-image sigma/background
+    randomisation in the benchmark, so there is no "worst case" range to bound.
     Reads the vendored detector CONFIG (``jitter_frac == 0`` in our configs, so
     the sampled knees equal these); the ``_SAT_TARGET_FRAC`` headroom absorbs any
     narrow jitter. Returns an ``intensity`` override dict; edits nothing vendored.
@@ -258,14 +413,10 @@ def _curvature_intensity_window(
     knee1 = float(ch1.get("saturation_knee", math.inf))
     knee2 = float(ch2.get("saturation_knee", math.inf))
 
-    pcfg = operating_point.get("psf", {})
-    sigma1_min = float(pcfg.get("sigma1", {}).get("min", 1.0))
-    mismatch_min = float(pcfg.get("c2_sigma_mismatch", {}).get("min", 1.05))
-    sigma2_min = sigma1_min * mismatch_min           # smallest sigma -> highest peak fraction
-    pf1 = psf.gaussian_peak_fraction(sigma1_min)
-    pf2 = psf.gaussian_peak_fraction(sigma2_min)
+    pf1 = psf.gaussian_peak_fraction(_BENCH_SIGMA1)
+    pf2 = psf.gaussian_peak_fraction(_BENCH_SIGMA2)
 
-    bg_max = float(operating_point.get("background", {}).get("level", {}).get("max", 0.0))
+    bg_max = _BENCH_BACKGROUND_PHOTONS
     scatter_factor = math.exp(_CURV_SCATTER_SIGMAS * _CURVATURE_SCATTER_STD)
 
     # ch1 ceiling: A1 itself (no ratio-law scatter on ch1).
@@ -291,12 +442,13 @@ def _curvature_intensity_window(
 class BenchmarkConfig:
     """Parameters for a two-family benchmark generation run.
 
-    ``snr_edges`` are the frozen checkpoint SNR bin edges; a cell is labelled by
-    its SNR bin's LOWER edge (half-open ``[lower, next)``) and by its area density
-    in spots/px. ``density_levels`` are constant area densities (spots per pixel):
-    each is a cell knob AND its label -- no neighbour-count binning, no clustering.
-    Every density level is generated at every SNR level (full orthogonal grid).
-    The number of ``_SNR_LADDER`` entries must match ``len(snr_edges) - 1``.
+    ``snr_targets`` are TRUE constant-SNR levels (Change 4): for each, the single
+    spot intensity is solved by inverting the frozen ``_features`` SNR, and a cell
+    is labelled by its target SNR and its area density in spots/px.
+    ``density_levels`` are constant area densities (spots per pixel): each is a
+    cell knob AND its label -- no neighbour-count binning, no clustering. Every
+    density level is generated at every SNR level (full orthogonal grid), and SNR
+    and density are orthogonal (intensity is solved from SNR alone).
     """
 
     seed: int = 0
@@ -305,7 +457,13 @@ class BenchmarkConfig:
     density_radius_px: float = 4.0       # informational realised-neighbour stat only
 
     # Family 1
-    snr_edges: tuple[float, ...] = (0.0, 2.0, 5.0, 10.0, 20.0, 50.0, math.inf)
+    # TRUE constant-SNR target levels (min(snr1, snr2) per the frozen definition).
+    # The 0-edge (unsolvable) and inf-edge of the old bin scheme are dropped; a
+    # cell is a point target, not a half-open bin. CAPPED below the protein-ADC
+    # clip: at the chosen protein gain 40 the ch2 ADC clips near SNR ~= 16.8, so
+    # the grid stays under that; generation ASSERTS no cell clips either channel
+    # (a clipping target fails loud).
+    snr_targets: tuple[float, ...] = (2.0, 3.0, 5.0, 8.0, 10.0, 15.0)
     # Constant AREA densities (spots/px): sweep across and slightly beyond the
     # training range [~0.0006, ~0.012]. Each is used as both the knob and label.
     density_levels: tuple[float, ...] = (0.0006, 0.002, 0.006, 0.012, 0.015)
@@ -321,10 +479,10 @@ class BenchmarkConfig:
     min_alpha_decades: float = 1.0
 
     def __post_init__(self) -> None:
-        if len(_SNR_LADDER) != len(self.snr_edges) - 1:
-            raise ValueError(
-                f"_SNR_LADDER has {len(_SNR_LADDER)} entries but snr_edges implies "
-                f"{len(self.snr_edges) - 1} bins")
+        if len(self.snr_targets) < 1:
+            raise ValueError("snr_targets must have at least one target SNR")
+        if any(s <= 0.0 or math.isinf(s) for s in self.snr_targets):
+            raise ValueError("snr_targets must be positive and finite (they are solved for)")
         if len(self.density_levels) < 1:
             raise ValueError("density_levels must have at least one area density")
         if any(d <= 0.0 for d in self.density_levels):
@@ -446,22 +604,76 @@ def _generate_set(
 def generate_snr_density_family(
     base_config: dict, cfg: BenchmarkConfig, family_root: Path, *, log_fn=print,
 ) -> dict:
-    """Generate the SNR x density family. Returns a summary dict for the manifest."""
+    """Generate the SNR x density family (TRUE constant-SNR cells). Summary dict.
+
+    Each cell is a TRUE constant-SNR condition (Change 4): given the FIXED PSF,
+    the CONSTANT 2-photon background and the MEASURED per-channel detector, the
+    single spot intensity ``A`` is solved by inverting the frozen ``_features``
+    SNR so ``min(snr1(A), snr2(A)) == target``. Every spot in the cell gets that
+    SAME intensity (neutral zero-scatter ratio law -> ``A2 == A1 == A``, no
+    jitter), so the realised per-spot SNR has ~zero spread and equals the target.
+    SNR and density stay ORTHOGONAL: intensity is solved from SNR alone, never
+    coupled to the cell's density.
+    """
     family_root.mkdir(parents=True, exist_ok=True)
-    n_snr = len(cfg.snr_edges) - 1
+    axis = _bench_axis_params(base_config)
     cells = []
+    warnings: list[str] = []
     t0 = time.perf_counter()
 
-    for si in range(n_snr):
+    det = base_config.get("detector", {})
+    _g1 = float(det.get("ch1", {}).get("gain", 1.0))
+    _k1 = float(det.get("ch1", {}).get("saturation_knee", math.inf))
+    _pf1 = psf.gaussian_peak_fraction(_BENCH_SIGMA1)
+    _g2 = float(det.get("ch2", {}).get("gain", 1.0))
+    _k2 = float(det.get("ch2", {}).get("saturation_knee", math.inf))
+    _pf2 = psf.gaussian_peak_fraction(_BENCH_SIGMA2)
+
+    for si, target_snr in enumerate(cfg.snr_targets):
+        # Solve ONCE per SNR target (density-independent -> orthogonal grid).
+        solved = _solve_intensity_for_snr(float(target_snr), axis)
+        A = solved["intensity"]
+        log10_A = math.log10(A)
+        snr_in_dist = _LEGACY_A1_MIN <= A <= _LEGACY_A1_MAX
+
+        # NO-CLIP GUARANTEE (Change/decision 1): the SNR grid is capped so every
+        # cell stays below BOTH channels' ADC knee. Assert it and FAIL LOUD rather
+        # than ship a clipped cell -- clipped intensity is unrecoverable, so such a
+        # cell would measure nothing about method quality.
+        ch1_saturates, ch1_gained_peak = _channel_saturates(A, _g1, _k1, _pf1)
+        ch2_saturates, ch2_gained_peak = _channel_saturates(A, _g2, _k2, _pf2)
+        if ch1_saturates or ch2_saturates:
+            raise ValueError(
+                f"snr_density SNR={target_snr:g}: solved A={A:.1f} photons CLIPS a channel "
+                f"(ch1 gained peak {ch1_gained_peak:.0f} vs knee {_k1:g}; ch2 gained peak "
+                f"{ch2_gained_peak:.0f} vs knee {_k2:g} ADU). Clipped intensity is "
+                f"unrecoverable -- cap snr_targets so every cell stays below both knees. "
+                f"At the chosen protein gain 40 the ch2 ADC clips near SNR ~= 16.8.")
+
+        if not snr_in_dist:
+            msg = (f"[warn] snr_density SNR={target_snr:g}: solved intensity A={A:.1f} "
+                   f"photons is out-of-range for the LEGACY checkpoints (legacy-trained "
+                   f"[{_LEGACY_A1_MIN:g}, {_LEGACY_A1_MAX:g}]) -- coverage artifact, not a "
+                   f"method difference; {_RETRAIN_NOTE}")
+            warnings.append(msg)
+            log_fn(msg)
+
         for di, density in enumerate(cfg.density_levels):
-            s_lbl = _edge_label(cfg.snr_edges[si])
+            s_lbl = _edge_label(float(target_snr))
             d_lbl = _edge_label(density)                 # spots/px, e.g. "0.006"
             label = f"snr={s_lbl}_density={d_lbl}"
             set_dir = family_root / label
             set_seed = _set_seed(cfg.seed, "snr_density", label)
+            density_is_stress = density > _LEGACY_DENSITY_MAX
 
-            # SNR ladder x constant area density (uniform placement, no clustering).
-            override = _deep_merge(_SNR_LADDER[si], _constant_density_override(density))
+            # FIXED PSF + CONSTANT background + solved point intensity (window
+            # pinned to a single value: log10_min == log10_max -> every spot gets
+            # exactly A) + constant area density (uniform, no clustering) + the
+            # NEUTRAL zero-scatter ratio law (A2 == A1, no jitter).
+            override = _deep_merge(_FIXED_PSF, _CONSTANT_BACKGROUND)
+            override = _deep_merge(override, {
+                "intensity": {"log10_min": log10_A, "log10_max": log10_A, "dim_bias": 1.0}})
+            override = _deep_merge(override, _constant_density_override(density))
             override = _deep_merge(override, _NEUTRAL_RATIO_LAW)
 
             res = _generate_set(
@@ -478,26 +690,57 @@ def generate_snr_density_family(
                 f"{label}: area density not constant/at target: {sorted(set(realised_dens))} "
                 f"vs {density}")
 
+            # TRUE constant-SNR invariant: realised per-spot SNR has ~zero spread
+            # and equals the target (Change 4 sanity test).
+            snr_arr = res["snr"]
+            snr_spread = (float(np.max(snr_arr)) - float(np.min(snr_arr))) if snr_arr.size else 0.0
+            realised_snr_median = float(np.median(snr_arr)) if snr_arr.size else None
+            assert snr_spread <= 1e-6, (
+                f"{label}: realised per-spot SNR spread {snr_spread:.3e} not ~0 "
+                f"(constant-SNR cell must have identical per-spot SNR)")
+            assert (realised_snr_median is None
+                    or math.isclose(realised_snr_median, float(target_snr),
+                                    rel_tol=1e-6, abs_tol=1e-6)), (
+                f"{label}: realised SNR median {realised_snr_median} != target {target_snr}")
+
             meta = {
                 "family": "snr_density",
                 "label": label,
                 "condition": {
-                    "snr_bin": _bin_label(cfg.snr_edges, si),
+                    "target_snr": float(target_snr),
                     "snr_index": si,
-                    "snr_nominal_lower_edge": _json_edge(cfg.snr_edges[si]),
                     "area_density_spots_per_px": float(density),
                     "density_index": di,
                     "placement": "uniform_random (no clustering)",
                 },
+                "target_snr": float(target_snr),
+                "solved_intensity_photons": A,
+                "solved_A1_photons": A,          # ch1 == ch2 (neutral zero-scatter ratio law)
+                "solved_A2_photons": A,
+                "solved_snr1_at_A": solved["snr1"],
+                "solved_snr2_at_A": solved["snr2"],
+                "limiting_channel": solved["limiting_channel"],
+                "snr_in_legacy_training_distribution": bool(snr_in_dist),
+                "protein_channel_saturates": bool(ch2_saturates),
+                "protein_channel_gained_peak_adu": float(ch2_gained_peak),
+                "realised_snr_spread": float(snr_spread),
                 "area_density_spots_per_px": float(density),
                 "area_density_constant_per_cell": bool(constant_density),
-                "note": ("Nominal SNR target condition (not a per-spot guarantee): a wide "
-                         "intensity draw is kept on purpose, so per-spot SNR is a "
-                         "distribution around the label (see realised_snr). Area density "
-                         "IS an exact per-cell constant, set at generation; spots are "
-                         "placed uniformly at random with no clustering."),
-                "ratio_law": "neutral (sim_intercept=0, sim_log_slope=0 -> true_alpha=0)",
+                "density_is_stress": bool(density_is_stress),
+                "note": ("TRUE constant-SNR cell: the single spot intensity A was solved by "
+                         "inverting the frozen _features SNR given the FIXED PSF (sigma1=1.4, "
+                         "sigma2=1.68), the CONSTANT 2-photon background and the MEASURED "
+                         "per-channel detector, so every spot has identical A (A2==A1, no "
+                         "jitter) -> identical peak -> identical SNR (~zero spread, equals "
+                         "target). Area density is an exact per-cell constant; spots are "
+                         "placed uniformly at random with no clustering. SNR and density "
+                         "are orthogonal (intensity solved from SNR only)."),
+                "ratio_law": "neutral zero-scatter (sim_intercept=0, sim_log_slope=0, "
+                             "scatter=0 -> A2==A1, true_alpha=0)",
                 "true_alpha": 0.0,
+                "sigma1": _BENCH_SIGMA1,
+                "sigma2": _BENCH_SIGMA2,
+                "background_photons": _BENCH_BACKGROUND_PHOTONS,
                 "n_images": res["n_images"],
                 "n_spots_total": res["n_spots_total"],
                 "n_saturated_total": res["n_saturated_total"],
@@ -515,21 +758,31 @@ def generate_snr_density_family(
             }
             _write_json(set_dir / "meta.json", meta)
             cells.append({"label": label, "snr_index": si, "density_index": di,
+                          "target_snr": float(target_snr),
+                          "solved_intensity_photons": A,
+                          "snr_in_legacy_training_distribution": bool(snr_in_dist),
+                          "protein_channel_saturates": bool(ch2_saturates),
+                          "density_is_stress": bool(density_is_stress),
                           "area_density_spots_per_px": float(density),
                           "n_images": res["n_images"], "n_spots": res["n_spots_total"],
                           "seed": set_seed,
-                          "realised_snr_median": (float(np.median(res["snr"]))
-                                                  if res["snr"].size else None),
+                          "realised_snr_median": realised_snr_median,
+                          "realised_snr_spread": float(snr_spread),
                           "realised_neighbors_mean": (float(np.mean(res["n_neighbors"]))
                                                       if res["n_neighbors"].size else None)})
+            ood = "  [OOD]" if not snr_in_dist else ""
+            stress = "  [density-stress]" if density_is_stress else ""
             log_fn(f"  [snr_density] {label:>24}: {res['n_images']} imgs, "
-                   f"{res['n_spots_total']:>6} spots, density={density:g} spots/px")
+                   f"{res['n_spots_total']:>6} spots, SNR={target_snr:g} (A={A:.0f} ph), "
+                   f"density={density:g} spots/px{ood}{stress}")
 
     dt = time.perf_counter() - t0
     n_images = sum(c["n_images"] for c in cells)
     n_spots = sum(c["n_spots"] for c in cells)
+    solved_table = _build_solved_intensity_table(base_config, cfg.snr_targets)
     return {"n_cells": len(cells), "n_images": n_images, "n_spots": n_spots,
-            "seconds": dt, "cells": cells}
+            "seconds": dt, "cells": cells, "solved_intensity_table": solved_table,
+            "warnings": warnings}
 
 
 # --------------------------------------------------------------------------- #
@@ -559,8 +812,13 @@ def generate_curvature_family(
         # Size the A1 window PER SET so the brightest ch2 spot clears the knee at
         # this pinned slope (Change 2), while keeping >= the minimum A1 spread.
         intensity_window = _curvature_intensity_window(
-            base_config, _CURVATURE_OPERATING_POINT, sim_log_slope, cfg.min_alpha_decades)
-        override = _deep_merge(_CURVATURE_OPERATING_POINT, {
+            base_config, sim_log_slope, cfg.min_alpha_decades)
+        # Operating point + benchmark-wide FIXED PSF and CONSTANT background
+        # (Change 5 adopts Change 2/3), then the per-set intensity window and the
+        # pinned ratio law. WIDE A1 spread is preserved (window >= min decades).
+        override = _deep_merge(_CURVATURE_OPERATING_POINT, _FIXED_PSF)
+        override = _deep_merge(override, _CONSTANT_BACKGROUND)
+        override = _deep_merge(override, {
             "intensity": {"log10_min": intensity_window["log10_min"],
                           "log10_max": intensity_window["log10_max"],
                           "dim_bias": intensity_window["dim_bias"]},
@@ -598,6 +856,25 @@ def generate_curvature_family(
             warnings.append(msg)
             log_fn(msg)
 
+        # A1 coverage vs the trained range (docs/training_distribution.md). The
+        # protein gain (chosen 40 ADU/photon) caps ch2 near ~4095/40 ~= 100
+        # photons/pixel, so the saturation-safe per-set A1 window sits at low
+        # absolute photon counts and can dip below the trained A1 min. Record and
+        # WARN so out-of-range degradation is read as a coverage artifact, not a
+        # method difference (Change 6, extended to the curvature family).
+        a1_min_photons = (10.0 ** a1_summary["min"]) if a1_summary["n"] else None
+        a1_max_photons = (10.0 ** a1_summary["max"]) if a1_summary["n"] else None
+        a1_in_dist = bool(a1_min_photons is not None
+                          and a1_min_photons >= _LEGACY_A1_MIN
+                          and a1_max_photons <= _LEGACY_A1_MAX)
+        if a1_min_photons is not None and not a1_in_dist:
+            msg = (f"[warn] curvature set {label}: realised A1 range "
+                   f"[{a1_min_photons:.0f}, {a1_max_photons:.0f}] photons extends outside "
+                   f"the legacy-trained [{_LEGACY_A1_MIN:g}, {_LEGACY_A1_MAX:g}] -- degradation "
+                   f"at the out-of-range end is a coverage artifact, not a method difference.")
+            warnings.append(msg)
+            log_fn(msg)
+
         # Sanity wiring, recorded in meta: true_alpha == 2 * sim_log_slope exactly.
         assert math.isclose(true_alpha, sim_slope_to_alpha(sim_log_slope), abs_tol=1e-12)
 
@@ -626,6 +903,16 @@ def generate_curvature_family(
             "a1_spread_ok": bool(spread_ok),
             "min_alpha_decades": cfg.min_alpha_decades,
             "intensity_window": intensity_window,
+            "a1_range_photons": ([a1_min_photons, a1_max_photons]
+                                 if a1_min_photons is not None else None),
+            "a1_in_legacy_training_distribution": a1_in_dist,
+            "a1_coverage_note": (
+                "The protein (ch2) gain (chosen 40) is ~6x the lipid gain, so ch2 hits the "
+                "12-bit ADC ceiling at a lower photon count than ch1; the saturation-safe A1 window "
+                "therefore sits at low absolute intensities and may extend below the LEGACY "
+                "A1 min (20 ph). This is expected and correct -- the wide A1 spread is required "
+                "to fit the slope, and low intensity is a genuine consequence of the measured "
+                f"detector. {_RETRAIN_NOTE} See a1_range_photons / a1_in_legacy_training_distribution."),
             "realised_log10_A1": a1_summary,
             "realised_log10_A2": _summary(res["log10_a2"]),
             "realised_snr": _summary(res["snr"]),
@@ -645,6 +932,7 @@ def generate_curvature_family(
                      "n_images": res["n_images"], "n_spots": res["n_spots_total"],
                      "seed": set_seed, "a1_spread_decades": float(spread),
                      "a1_spread_ok": bool(spread_ok),
+                     "a1_in_legacy_training_distribution": a1_in_dist,
                      "ch2_saturated_fraction": float(ch2_sat_frac)})
         flag = "  [NULL CONTROL]" if is_null else ""
         log_fn(f"  [curvature] {label:>14}: alpha={true_alpha:+.3f} "
@@ -686,6 +974,7 @@ def generate_benchmark(
     fam2 = generate_curvature_family(base_config, cfg, bench_root / "curvature", log_fn=log_fn)
 
     total_dt = time.perf_counter() - t0
+    detector_top = _detector_top_level(base_config)
     manifest = {
         "kind": "spotpipe_benchmark",
         "generation_only": True,
@@ -697,25 +986,87 @@ def generate_benchmark(
         "seed": cfg.seed,
         "config_hash": _config_hash({
             "seed": cfg.seed, "height": cfg.height, "width": cfg.width,
-            "snr_edges": [_json_edge(e) for e in cfg.snr_edges],
+            "snr_targets": [float(s) for s in cfg.snr_targets],
             "density_levels": [float(d) for d in cfg.density_levels],
             "images_per_cell": cfg.images_per_cell,
             "alpha_values": list(cfg.alpha_values),
             "images_per_alpha": cfg.images_per_alpha,
             "null_control_multiplier": cfg.null_control_multiplier,
+            "detector": detector_top,
+            "sigma1": _BENCH_SIGMA1, "sigma2": _BENCH_SIGMA2,
+            "background_photons": _BENCH_BACKGROUND_PHOTONS,
         }),
         "schema_columns": list(SCHEMA_COLUMNS),
+        # Measured detector + fixed benchmark constants, recorded top-level (they
+        # are also in every set's meta.json). See CLAUDE.md / docs/snr_convention.md.
+        "detector": detector_top,
+        "benchmark_constants": {
+            "sigma1_px": _BENCH_SIGMA1,
+            "sigma2_px": _BENCH_SIGMA2,
+            "psf_note": "FIXED PSF for the ENTIRE benchmark (both families); no per-image "
+                        "sigma randomisation. sigma2 = 1.2 * sigma1.",
+            "background_photons": _BENCH_BACKGROUND_PHOTONS,
+            "background_gradient_frac": 0.0,
+            "background_structure_frac": 0.0,
+            "background_note": ("CONSTANT 2-photon flat background, both channels, every image; "
+                                "gradient == structure == 0. This is an ASSUMPTION, not a "
+                                "measurement: dark frames have the laser off, so they cannot "
+                                "measure photon background (a laser-on/no-sample frame would be "
+                                "needed)."),
+            "detector_measured_2026_07_13": ("ch1 (lipid) gain from a photon-transfer curve; "
+                                             "offset + read variance from dark frames; gain is the "
+                                             "variance-matching gain (includes PMT excess noise), "
+                                             "so excess_noise_factor = 1.0."),
+            "ch2_gain_is_chosen_not_measured": (
+                "ch2 (protein) gain = 40.0 is a CHOSEN value representing a PLANNED lower-voltage "
+                "acquisition, NOT a measurement. The MEASURED gain at the current 750 V setting is "
+                "124.3, which saturates the protein channel at ~32 photons peak and forced the "
+                "benchmark into a single-photon regime (curvature A1 collapsed toward [1, 35] ph). "
+                "We intend to lower the PMT voltage to avoid this, so the benchmark simulates the "
+                "settings we will ACTUALLY USE. gain 40 -> protein clips at ~4095/40 ~= 100 photons "
+                "peak (max unclipped SNR ~= 16.8), keeps ~20x read-noise sigma per photoelectron, "
+                "and lies inside the retrain's randomized gain range [20, 150]. RE-MEASURE the gain "
+                "at whatever voltage is finally used; do not mistake 40 for a measurement."),
+            "ch1_gain_simplification": (
+                "Lowering the PMT voltage would in reality also lower the LIPID (ch1) gain somewhat. "
+                "We keep ch1 at the MEASURED 6.63 because lipid is nowhere near its ADC ceiling and "
+                "is never the limiting channel -- flagged as a simplification, not a measurement."),
+            "saturation_knee_note": ("saturation_knee = adc_max - offset (the physical 12-bit "
+                                     "ADC ceiling above the pedestal); the soft tanh knee's "
+                                     "asymptote sits at the hard clip. This is a benchmark-layer "
+                                     "choice, not an independent measurement."),
+            "channel_mapping": "ch1 = LIPID (561 nm), ch2 = PROTEIN (488 nm) -- pipeline order, "
+                               "OPPOSITE the acquisition order.",
+            "snr_grid_no_clip_guarantee": ("snr_targets are capped so EVERY family-1 cell stays "
+                                           "below both channels' ADC knee (asserted at generation "
+                                           "-- generation FAILS if a cell clips). At the chosen "
+                                           "protein gain 40 the ch2 ADC clips near SNR ~= 16.8, so "
+                                           "the grid stays below that."),
+            "legacy_trained_a1_range_photons": [_LEGACY_A1_MIN, _LEGACY_A1_MAX],
+            "legacy_trained_density_max_spots_per_px": _LEGACY_DENSITY_MAX,
+            "retrain_note": _RETRAIN_NOTE,
+        },
+        "known_unmodeled_features": {
+            "protein_pmt_dark_counts": (
+                "The 488/protein PMT at 750 V emits ~0.57% of pixels/frame as spurious "
+                "single-photoelectron spikes (~one gain step, ~offset+124 ADU, tail to "
+                "~1900 ADU); the 561/lipid PMT (500 V) shows none. These look like dim "
+                "single-pixel 'spots' in ch2. NOT modelled in this benchmark; see the "
+                "separate dark-count robustness check (scripts/darkcount_robustness.py)."),
+        },
         "grid": {
-            "snr_edges": [_json_edge(e) for e in cfg.snr_edges],
+            "snr_targets": [float(s) for s in cfg.snr_targets],
             "density_levels": [float(d) for d in cfg.density_levels],
             "density_radius_px": cfg.density_radius_px,
-            "cell_label": ("snr = SNR bin lower edge (half-open [lower, next)); "
-                           "density = constant area density in spots/px"),
+            "cell_label": ("snr = TRUE constant target SNR (intensity solved by inverting the "
+                           "frozen SNR); density = constant area density in spots/px"),
         },
+        "solved_intensity_table": fam1["solved_intensity_table"],
         "snr_definition": ("peak SNR per channel = (A/(2*pi*sigma^2)) / sqrt(((peak+B)"
                            "+read^2)/n_frames); per-spot scalar = min(snr1, snr2); "
-                           "background B = flat level only. See _features.py and "
-                           "docs/snr_convention.md."),
+                           "background B = flat level only. Family-1 cells INVERT this to "
+                           "solve for a single spot intensity per target (true constant SNR, "
+                           "zero spread). See _features.py and docs/snr_convention.md."),
         "density_definition": ("area density in spots per pixel, CONSTANT per cell, set at "
                                "generation and used as the cell label; n_spots = "
                                "round(density*H*W), uniform-random placement, no clustering. "
@@ -723,12 +1074,13 @@ def generate_benchmark(
                                f"{cfg.density_radius_px} is recorded per cell as an "
                                "informational diagnostic only. See _features.py."),
         "families": {
-            "snr_density": {k: v for k, v in fam1.items() if k != "cells"},
+            "snr_density": {k: v for k, v in fam1.items()
+                            if k not in ("cells", "solved_intensity_table")},
             "curvature": {k: v for k, v in fam2.items() if k not in ("sets",)},
         },
         "snr_density_cells": fam1["cells"],
         "curvature_sets": fam2["sets"],
-        "warnings": fam2["warnings"],
+        "warnings": fam1.get("warnings", []) + fam2["warnings"],
         "totals": {
             "n_images": fam1["n_images"] + fam2["n_images"],
             "n_spots": fam1["n_spots"] + fam2["n_spots"],
@@ -744,15 +1096,15 @@ def generate_benchmark(
 # --------------------------------------------------------------------------- #
 # Config loading                                                              #
 # --------------------------------------------------------------------------- #
-def _bin_label(edges: tuple[float, ...], i: int) -> str:
-    lo, hi = edges[i], edges[i + 1]
-    if math.isinf(hi):
-        return f">={lo:g}"
-    return f"[{lo:g},{hi:g})"
+def _detector_top_level(base_config: dict) -> dict:
+    """The (already override-merged) detector config, for the manifest top-level.
 
-
-def _json_edge(e: float):
-    return "inf" if (isinstance(e, float) and math.isinf(e)) else float(e)
+    ``jitter_frac == 0`` in the benchmark configs, so these configured constants
+    are exactly what every set samples; recording them here as well as in each
+    set's meta.json satisfies the "record all of it top-level" requirement.
+    """
+    det = copy.deepcopy(base_config.get("detector", {}))
+    return det
 
 
 def _write_json(path: Path, obj: dict) -> None:
@@ -781,13 +1133,15 @@ def load_benchmark_config(path: str | Path) -> tuple[dict, BenchmarkConfig]:
         base_raw = yaml.safe_load(fh) or {}
     base_config = base_raw.get("simulator", {})
 
+    # Benchmark-layer simulator overrides (e.g. the MEASURED detector) deep-merged
+    # onto the base config, so the DISPOSABLE benchmark can pin the real-instrument
+    # detector WITHOUT touching the training configs (default.yaml / smoke.yaml,
+    # which the checkpoints depend on). CLAUDE.md: modify only the benchmark layer.
+    sim_overrides = raw.get("simulator_overrides", {}) or {}
+    if sim_overrides:
+        base_config = _deep_merge(base_config, sim_overrides)
+
     b = dict(raw.get("benchmark", {}) or {})
-    # inf-aware edge parsing (yaml `.inf` -> math.inf; string "inf" tolerated too).
-    def _edges(key, default):
-        vals = b.get(key, default)
-        return tuple(math.inf if (v is None or (isinstance(v, str) and v.lower() == "inf")
-                                  or (isinstance(v, float) and math.isinf(v)))
-                     else float(v) for v in vals)
 
     kwargs = {}
     if "seed" in b:
@@ -795,8 +1149,8 @@ def load_benchmark_config(path: str | Path) -> tuple[dict, BenchmarkConfig]:
     if "image" in b:
         kwargs["height"] = int(b["image"].get("height", 256))
         kwargs["width"] = int(b["image"].get("width", 256))
-    if "snr_edges" in b:
-        kwargs["snr_edges"] = _edges("snr_edges", None)
+    if "snr_targets" in b:
+        kwargs["snr_targets"] = tuple(float(s) for s in b["snr_targets"])
     if "density_levels" in b:
         kwargs["density_levels"] = tuple(float(d) for d in b["density_levels"])
     if "images_per_cell" in b:

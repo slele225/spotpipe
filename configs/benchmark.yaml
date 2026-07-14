@@ -1,25 +1,71 @@
-# Full benchmark: real sizes. Reuses default.yaml's simulator block (256x256,
-# vendored detector + scene ranges) by reference. Generation only -- no method
-# runs, no slope fit, no metric (see src/spotpipe/benchmark/generate.py).
+# Full benchmark v2: real sizes. Reuses default.yaml's simulator block (256x256,
+# vendored scene ranges) by reference, then OVERRIDES the detector with the
+# MEASURED per-channel instrument constants (2026-07-13). Generation only -- no
+# method runs, no slope fit, no metric (see src/spotpipe/benchmark/generate.py).
+#
+# Modifies ONLY the disposable benchmark layer: the measured detector is applied
+# here via `simulator_overrides` so the TRAINING configs (default.yaml/smoke.yaml,
+# which the frozen checkpoints depend on) stay untouched. Nothing vendored changes.
 
 base_simulator_config: default.yaml   # relative to configs/; its `simulator:` block is used
+
+# MEASURED detector (2026-07-13), deep-merged onto the base simulator config.
+# Gain from a photon-transfer curve; offset + read variance from dark frames.
+# CHANNEL MAPPING: ch1 = LIPID (561 nm), ch2 = PROTEIN (488 nm) -- pipeline order,
+# OPPOSITE the acquisition order. A swap here inverts A2/A1 and destroys alpha.
+simulator_overrides:
+  detector:
+    n_frames: 3
+    poisson_gaussian_threshold: 20
+    adc_max: 4095
+    jitter_frac: 0.0
+    ch1:   # LIPID, 561 nm / Alexa 594, PMT 500 V
+      gain: 6.63                       # ADU/photon, variance-matching (includes PMT excess)
+      offset: 154.0                    # ADU, shared digitizer pedestal
+      excess_noise_factor: 1.0         # excess already folded into the variance-matching gain
+      saturation_knee: 3941.0          # = adc_max - offset (physical 12-bit ceiling above pedestal)
+      noise_floor_sigma: 1.760681686165901   # sqrt(3.1 ADU^2) read variance
+    ch2:   # PROTEIN, 488 nm / Alexa 488
+      # gain = 40.0 is a CHOSEN value representing a PLANNED lower-voltage acquisition,
+      # NOT a measurement. The MEASURED gain at the current 750 V setting is 124.3, which
+      # saturates the protein channel at ~32 photons peak and forced the benchmark into a
+      # single-photon regime. We intend to lower the PMT voltage to avoid this, so the
+      # benchmark simulates the settings we will ACTUALLY USE. Re-measure the gain at the
+      # voltage finally used. (gain 40 -> protein clips at ~4095/40 ~= 100 photons peak,
+      # ~20x read-noise sigma per PE, and is inside the retrain's randomized gain [20,150].)
+      gain: 40.0                       # CHOSEN (planned lower-voltage), NOT measured; measured=124.3
+      offset: 154.0                    # ADU, shared digitizer pedestal (measured)
+      excess_noise_factor: 1.0
+      saturation_knee: 3941.0
+      noise_floor_sigma: 2.0976176963403033  # sqrt(4.4 ADU^2) read variance (measured)
 
 benchmark:
   seed: 0
   # image size defaults to the base (256x256); override here if desired.
 
-  # Family 1 -- SNR x density. SNR = frozen checkpoint bin edges (a cell is labelled
-  # by its bin's lower edge, half-open [lower, next)). Density = CONSTANT AREA
+  # Family 1 -- SNR x density. SNR = TRUE constant-SNR target levels: for each,
+  # the single spot intensity is SOLVED by inverting the frozen _features SNR
+  # given the FIXED PSF, CONSTANT 2-photon background and MEASURED detector, so
+  # every spot in a cell has identical SNR (zero spread). Density = CONSTANT AREA
   # DENSITY levels in spots/px (the knob AND the label; no clustering, uniform
-  # placement), swept across and slightly beyond the training range [~0.0006,
-  # ~0.012]. Full orthogonal grid: 6 SNR x 5 density = 30 cells.
-  snr_edges:      [0, 2, 5, 10, 20, 50, inf]
+  # placement), swept across and slightly beyond the training range. Full
+  # orthogonal grid: 4 SNR x 5 density = 20 cells.
+  #
+  # SNR grid CAPPED below the protein-ADC clip. At the CHOSEN protein gain 40
+  # (planned lower-voltage acquisition; the measured 750 V gain is 124.3), the ch2
+  # peak pixel hits the 12-bit ADC ceiling near ~100 photons (SNR ~= 16.8). The
+  # grid [2, 3, 5, 8, 10, 15] stays under that with headroom (SNR=15 leaves ~783
+  # ADU / ~20% headroom); SNR 17+ would clip. Generation ASSERTS no cell clips
+  # either channel. (Gain 40 lifts the benchmark out of the single-photon regime
+  # the measured 124.3 forced -- see simulator_overrides note and snr_convention.md.)
+  snr_targets:    [2, 3, 5, 8, 10, 15]
   density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015]
   density_radius_px: 4.0   # informational realised-neighbour stat only
   images_per_cell: 50
 
   # Family 2 -- curvature. Full alpha range + dense-near-zero (union, 0 once).
-  # true_alpha is realised via pinned sim_log_slope = alpha / 2.
+  # true_alpha is realised via pinned sim_log_slope = alpha / 2. Wide A1 spread is
+  # preserved (sized per set); adopts the same FIXED PSF + CONSTANT background.
   alpha_values: [-1.2, -0.9, -0.6, -0.3, -0.15, -0.075, 0.0, 0.075, 0.15, 0.3, 0.6, 0.9, 1.2]
   images_per_alpha: 50
   null_control_multiplier: 3   # alpha=0 gets 3x images (tight null-control error bars)
