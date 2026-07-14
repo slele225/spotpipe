@@ -3,8 +3,16 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
-outputs/
-results/
-data/
+
+# ROOT-ANCHORED (leading slash) ON PURPOSE. These ignore the top-level generated
+# artifact dirs ONLY. Without the leading slash, `data/` matches a directory named
+# `data` at ANY depth -- which silently swallowed `src/spotpipe/data/__init__.py`,
+# so the package was missing from every fresh clone and `import spotpipe.data`
+# failed on the remote while working fine on the dev box (git does not track empty
+# directories, so the dir simply vanished). Fixed 2026-07-14. Do not drop the slash.
+/outputs/
+/results/
+/data/
+
 # checkpoints are tracked deliberately (small, precious) -- do NOT ignore
 # src/spotpipe/models/checkpoints/
