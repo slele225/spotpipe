@@ -12,13 +12,16 @@ faithful transcription of the vendored per-image decode; ``test_infer`` asserts
 ``_decode_image`` reproduces ``predict_spots`` bit-for-bit so the two can never
 drift.
 
-Provenance honesty (REQUIRED). The two carried checkpoints (``hrnet_large`` and
-``hrnet_small``) were trained on the OLD dirty-tree simulator
-(``93fc0aa8...-dirty``), not the clean vendored one. Their outputs are labelled
-``our_model_<name>_legacy`` and every ``RUN_MANIFEST.json`` records the
-checkpoint, its recorded training SHA and a LEGACY/REFERENCE note. These are a
-pipeline-derisking reference run, NOT the reproducible headline -- that will
-come from a clean retrain.
+Provenance honesty (REQUIRED), DERIVED not assumed. Every ``RUN_MANIFEST.json``
+records the checkpoint, its recorded training SHA and a provenance status that is
+computed from that SHA by :func:`is_legacy_checkpoint`:
+
+* LEGACY/REFERENCE -- trained on the OLD dirty-tree simulator (``93fc0aa8...``),
+  e.g. ``hrnet_large`` / ``hrnet_small``. Outputs go to ``our_model_<name>_legacy``.
+  A pipeline-derisking reference run, NOT the reproducible headline.
+* CLEAN RETRAIN/HEADLINE -- trained on the clean vendored simulator, e.g.
+  ``hrnet_large_measured`` (git ``26b0d48``). Outputs go to ``our_model_<name>``
+  (no ``_legacy`` suffix -- calling it legacy would be a lie).
 
 Output layout (mirrors the benchmark; one CSV per condition per method)::
 
@@ -76,6 +79,7 @@ __all__ = [
     "discover_conditions",
     "run_inference",
     "method_name",
+    "is_legacy_checkpoint",
 ]
 
 _FAMILIES = ("snr_density", "curvature")
@@ -177,9 +181,39 @@ def discover_checkpoints(checkpoints_root: Path) -> list[str]:
                   if (d / "best_checkpoint.pt").exists())
 
 
-def method_name(checkpoint_name: str) -> str:
-    """Labelled method folder for a checkpoint -- LEGACY per provenance rule."""
-    return f"our_model_{checkpoint_name}_legacy"
+# Training SHAs of the OLD dirty-tree simulator. A checkpoint whose recorded
+# training commit is one of these -- or whose provenance is unknown -- is LEGACY
+# and its outputs are labelled/flagged as such. Anything else is a clean-tree
+# retrain (e.g. ``hrnet_large_measured``, git 26b0d48) and is NOT legacy: it is a
+# reproducible headline model. Provenance is DERIVED here, never assumed.
+_LEGACY_TRAINING_SHA_PREFIXES: tuple[str, ...] = ("93fc0aa8",)
+
+_LEGACY_NOTE = (
+    "Trained on the OLD dirty-tree simulator (not the clean vendored one). "
+    "This is a pipeline-derisking reference run, NOT the reproducible headline "
+    "-- the headline comes from a clean retrain.")
+_CLEAN_NOTE = (
+    "Trained on the clean vendored simulator (retrain). Reproducible headline "
+    "model -- NOT legacy.")
+
+
+def is_legacy_checkpoint(training_git_sha: str) -> bool:
+    """True iff this checkpoint was trained on the OLD dirty-tree simulator."""
+    sha = (training_git_sha or "unknown").strip().lower()
+    if sha in ("", "unknown"):
+        return True                      # unprovenanced -> assume legacy (fail safe)
+    return sha.startswith(_LEGACY_TRAINING_SHA_PREFIXES)
+
+
+def method_name(checkpoint_name: str, training_git_sha: str = "unknown") -> str:
+    """Labelled method folder for a checkpoint.
+
+    Legacy (dirty-tree-trained) checkpoints keep the ``_legacy`` suffix, per the
+    provenance rule. Clean retrains get a plain ``our_model_<name>`` folder --
+    calling them legacy would be a lie.
+    """
+    suffix = "_legacy" if is_legacy_checkpoint(training_git_sha) else ""
+    return f"our_model_{checkpoint_name}{suffix}"
 
 
 # --------------------------------------------------------------------------- #
@@ -568,7 +602,8 @@ def run_inference(
 
     for name in names:
         bundle = load_checkpoint(name, checkpoints_root=checkpoints_root, repo_root=repo_root)
-        method = method_name(name)
+        method = method_name(name, bundle.training_git_sha)
+        legacy = is_legacy_checkpoint(bundle.training_git_sha)
         method_dir = results_root / method
         method_dir.mkdir(parents=True, exist_ok=True)
         manifest_path = method_dir / "RUN_MANIFEST.json"
@@ -577,8 +612,9 @@ def run_inference(
         log_fn(f"\n[infer] === method={method}  checkpoint={name} "
                f"({n_params / 1e6:.2f}M params) ===")
         log_fn(f"[infer] training_git_sha={bundle.training_git_sha}  "
-               f"(LEGACY/REFERENCE -- trained on OLD dirty-tree simulator; "
-               f"NOT the reproducible headline)")
+               + ("(LEGACY/REFERENCE -- trained on OLD dirty-tree simulator; "
+                  "NOT the reproducible headline)" if legacy else
+                  "(CLEAN RETRAIN -- reproducible headline model; NOT legacy)"))
         log_fn(f"[infer] inference params: peak_threshold={bundle.params.peak_threshold} "
                f"nms_kernel={bundle.params.nms_kernel} max_spots={bundle.params.max_spots} "
                f"adc_max={bundle.params.adc_max}")
@@ -656,11 +692,11 @@ def _init_manifest(bundle, method, dev, bench_root, results_root, repo_root,
         "checkpoint": bundle.name,
         "checkpoint_path": bundle.checkpoint_rel,
         "provenance": {
-            "status": "LEGACY/REFERENCE",
+            "status": ("LEGACY/REFERENCE" if is_legacy_checkpoint(bundle.training_git_sha)
+                       else "CLEAN RETRAIN/HEADLINE"),
             "training_git_sha": bundle.training_git_sha,
-            "note": ("Trained on the OLD dirty-tree simulator (not the clean vendored one). "
-                     "This is a pipeline-derisking reference run, NOT the reproducible "
-                     "headline -- the headline will come from a clean retrain."),
+            "note": (_LEGACY_NOTE if is_legacy_checkpoint(bundle.training_git_sha)
+                     else _CLEAN_NOTE),
         },
         "device": _device_label(dev),
         "cuda_available": bool(torch.cuda.is_available()),

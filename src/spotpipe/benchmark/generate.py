@@ -156,6 +156,14 @@ _BENCH_BACKGROUND_PHOTONS: float = 2.0  # flat photon background, CONSTANT, both
 _LEGACY_A1_MIN: float = 20.0            # ~ 10**1.3 photons (legacy checkpoints)
 _LEGACY_A1_MAX: float = 7943.0         # ~ 10**3.9 photons (legacy checkpoints)
 _LEGACY_DENSITY_MAX: float = 0.012     # spots/px (legacy log-uniform training max)
+
+# CURRENT training density coverage -- ``configs/train.yaml`` scene.density.max.
+# 2026-07-14: raised 0.012 -> 0.024 so the benchmark's new top density level (0.02)
+# sits INSIDE the trained range with headroom instead of on the boundary. The
+# density-stress flag is raised against THIS number (the headline model's coverage),
+# not the legacy one; both are recorded in the manifest. KEEP IN SYNC WITH
+# configs/train.yaml -- a silent divergence mislabels which cells are out-of-distribution.
+_TRAINED_DENSITY_MAX: float = 0.030    # spots/px (current log-uniform training max)
 _RETRAIN_NOTE: str = (
     "Ranges compared against are the LEGACY checkpoints' training distribution. A "
     "measured-detector RETRAIN is in progress (per-image intensity solved to keep "
@@ -174,6 +182,41 @@ _CONSTANT_BACKGROUND: dict = {
     "background": {"level": {"min": _BENCH_BACKGROUND_PHOTONS, "max": _BENCH_BACKGROUND_PHOTONS},
                    "gradient_frac": {"min": 0.0, "max": 0.0},
                    "structure_frac": {"min": 0.0, "max": 0.0}},
+}
+
+# ZERO REGISTRATION SHIFT -- applied to EVERY set in BOTH families.
+#
+# WHY (found 2026-07-13 while adapting cmeAnalysis; this was a real benchmark bug):
+# `forward_model.sample_scene_params` draws an INDEPENDENT per-image, per-channel
+# registration shift ~ U(-max_px, +max_px) and renders channel k at `spot + shift_k`.
+# `max_px` DEFAULTS TO 1.0, so it was active in the benchmark even though no
+# benchmark config ever asked for it. The ground-truth CSV stores the SCENE
+# position -- so GT marked a point the photons were NOT centred on, in EITHER
+# channel, and the per-image shift was never recorded anywhere.
+#
+# Consequences, all measured:
+#   * A single-channel detector (e.g. cmeAnalysis, which detects only in its
+#     master channel) sits a mean 0.765 px from GT no matter how well it fits.
+#     Observed: cmeAnalysis residual sd 0.569/0.581 px per axis, FLAT across a 25x
+#     intensity range -- not photon-limited, so not localization error at all.
+#     U(-1,1) has sd 1/sqrt(3) = 0.577. That was the entire residual.
+#   * A TWO-channel method can average its two observations and land a mean
+#     0.521 px from GT -- 1.47x closer, FOR FREE, with no better detection. That
+#     silently flatters our own model against every single-channel baseline.
+#   * Max shift displacement sqrt(2) = 1.414 px vs the evaluator's 1.68 px match
+#     radius: 84% of the tolerance budget consumed before any noise.
+#   * ch1/ch2 shift INDEPENDENTLY -> median 1.02 px (max 2.79 px) channel-to-channel
+#     misregistration, biasing any ch2 intensity read at ch1 positions.
+#
+# A real microscope's channel registration is a FIXED, calibrated affine; it does
+# not re-randomise every field of view. As TRAINING augmentation the random shift is
+# legitimate and stays in the training configs. In a BENCHMARK's ground truth it is a
+# measurement artifact. A benchmark measures; it does not randomise -- the same
+# principle as _FIXED_PSF / _CONSTANT_BACKGROUND above.
+#
+# Set EXPLICITLY to 0.0 -- do NOT rely on omission; the forward model's default is 1.0.
+_ZERO_REGISTRATION: dict = {
+    "registration_shift": {"max_px": 0.0},
 }
 
 # Density axis = CONSTANT AREA DENSITY (spots per pixel), set at generation and
@@ -464,9 +507,11 @@ class BenchmarkConfig:
     # the grid stays under that; generation ASSERTS no cell clips either channel
     # (a clipping target fails loud).
     snr_targets: tuple[float, ...] = (2.0, 3.0, 5.0, 8.0, 10.0, 15.0)
-    # Constant AREA densities (spots/px): sweep across and slightly beyond the
-    # training range [~0.0006, ~0.012]. Each is used as both the knob and label.
-    density_levels: tuple[float, ...] = (0.0006, 0.002, 0.006, 0.012, 0.015)
+    # Constant AREA densities (spots/px): sweep the training range [0.0006, 0.024].
+    # Each is used as both the knob and label. The top level 0.02 (~1310 spots per
+    # 256^2 image) is the crowding stress point; it is INSIDE the current trained
+    # range but ABOVE the legacy checkpoints' max (0.012).
+    density_levels: tuple[float, ...] = (0.0006, 0.002, 0.006, 0.012, 0.015, 0.02)
     images_per_cell: int = 30
 
     # Family 2
@@ -664,13 +709,18 @@ def generate_snr_density_family(
             label = f"snr={s_lbl}_density={d_lbl}"
             set_dir = family_root / label
             set_seed = _set_seed(cfg.seed, "snr_density", label)
-            density_is_stress = density > _LEGACY_DENSITY_MAX
+            # Stress = above the CURRENT training density max (0.024). Also track
+            # "above the LEGACY max (0.012)" separately, since the legacy checkpoints
+            # never saw >0.012 and degrade there as a coverage artifact.
+            density_is_stress = density > _TRAINED_DENSITY_MAX
+            density_above_legacy = density > _LEGACY_DENSITY_MAX
 
             # FIXED PSF + CONSTANT background + solved point intensity (window
             # pinned to a single value: log10_min == log10_max -> every spot gets
             # exactly A) + constant area density (uniform, no clustering) + the
             # NEUTRAL zero-scatter ratio law (A2 == A1, no jitter).
             override = _deep_merge(_FIXED_PSF, _CONSTANT_BACKGROUND)
+            override = _deep_merge(override, _ZERO_REGISTRATION)
             override = _deep_merge(override, {
                 "intensity": {"log10_min": log10_A, "log10_max": log10_A, "dim_bias": 1.0}})
             override = _deep_merge(override, _constant_density_override(density))
@@ -727,6 +777,7 @@ def generate_snr_density_family(
                 "area_density_spots_per_px": float(density),
                 "area_density_constant_per_cell": bool(constant_density),
                 "density_is_stress": bool(density_is_stress),
+                "density_above_legacy_training_max": bool(density_above_legacy),
                 "note": ("TRUE constant-SNR cell: the single spot intensity A was solved by "
                          "inverting the frozen _features SNR given the FIXED PSF (sigma1=1.4, "
                          "sigma2=1.68), the CONSTANT 2-photon background and the MEASURED "
@@ -763,6 +814,7 @@ def generate_snr_density_family(
                           "snr_in_legacy_training_distribution": bool(snr_in_dist),
                           "protein_channel_saturates": bool(ch2_saturates),
                           "density_is_stress": bool(density_is_stress),
+                          "density_above_legacy_training_max": bool(density_above_legacy),
                           "area_density_spots_per_px": float(density),
                           "n_images": res["n_images"], "n_spots": res["n_spots_total"],
                           "seed": set_seed,
@@ -818,6 +870,7 @@ def generate_curvature_family(
         # pinned ratio law. WIDE A1 spread is preserved (window >= min decades).
         override = _deep_merge(_CURVATURE_OPERATING_POINT, _FIXED_PSF)
         override = _deep_merge(override, _CONSTANT_BACKGROUND)
+        override = _deep_merge(override, _ZERO_REGISTRATION)
         override = _deep_merge(override, {
             "intensity": {"log10_min": intensity_window["log10_min"],
                           "log10_max": intensity_window["log10_max"],
@@ -1044,6 +1097,15 @@ def generate_benchmark(
                                            "the grid stays below that."),
             "legacy_trained_a1_range_photons": [_LEGACY_A1_MIN, _LEGACY_A1_MAX],
             "legacy_trained_density_max_spots_per_px": _LEGACY_DENSITY_MAX,
+            "trained_density_max_spots_per_px": _TRAINED_DENSITY_MAX,
+            "density_ramp_note": (
+                "2026-07-14: the family-1 density ramp was extended with a 6th level at 0.02 "
+                "spots/px (~1310 spots / 256^2) because it previously tapered off at 0.015. The "
+                "TRAINING density max was raised 0.012 -> 0.024 in the same change, so all six "
+                "levels are inside the trained range with headroom. 'density_is_stress' is "
+                "raised against the CURRENT trained max (0.024); 'density_above_legacy_training_max' "
+                "marks cells the LEGACY checkpoints never saw. Any model trained before "
+                "2026-07-14 is out-of-distribution at the top two levels."),
             "retrain_note": _RETRAIN_NOTE,
         },
         "known_unmodeled_features": {

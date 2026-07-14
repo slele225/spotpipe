@@ -9,13 +9,45 @@
 #
 # CHANNEL MAPPING: ch1 = LIPID (561 nm), ch2 = PROTEIN (488 nm) -- pipeline order,
 # OPPOSITE the acquisition order. A swap inverts A2/A1 and destroys alpha.
+#
+# ---------------------------------------------------------------------------
+# 2026-07-14 -- RETRAIN #2, to cover the re-centred benchmark grid (benchmark v3).
+# The benchmark's axes moved (docs/benchmark_grid_requirements.md): SNR DOWN onto the
+# live range [0.75, 3.0] and density UP to 0.025 (where PSFs physically merge). The
+# training support must CONTAIN that grid or the OOD cells measure coverage instead of
+# method -- so `scene.density.max` moves 0.012 -> 0.030.
+#
+# What the coverage probe (`scripts/coverage_probe.py`) established BEFORE this edit,
+# and what it changed about the plan:
+#
+#   * The new SNR axis needs per-spot A1 of 12.7 - 77.6 photons. That is ALREADY inside
+#     this config's support (floor_a1_photons = 3.0; 31-68% of trained spots sit at or
+#     above each level). The "SNR <= 1.0 is OOD" blocker in benchmark_grid_requirements.md
+#     is measured against the LEGACY checkpoints' [20, 7943] range and is STALE for the
+#     measured-detector model. No intensity-range change is needed for the SNR move.
+#
+#   * The density axis was the ONLY real gap: 0.025 > the old max. Hence 0.030 (headroom,
+#     so the top benchmark cell sits inside the range rather than on its boundary, where
+#     a model is weakest).
+#
+#   * docs/handoff_retrain_intensity_head.md hypothesised that solving intensity per image
+#     COUPLES brightness to density ("a dense image is forced dim"), making bright+dense
+#     structurally unreachable and explaining the intensity head's collapse there. The
+#     probe REFUTES this: corr(log density, log median-A1) = +0.02, and the A1 p50/p95/max
+#     profile is FLAT across every density quintile. `solve_a1_ceiling` takes gains, PSF,
+#     slope and background -- it never takes density -- so the two axes are drawn
+#     independently by construction. The intensity-head defect therefore has some OTHER
+#     cause, and none of the (a)/(b)/(c) options in that handoff's Sec.3 are warranted.
+#     See docs/coverage_probe_findings.md.
+# ---------------------------------------------------------------------------
 
 experiment:
-  name: measured-detector-hrnet-large
+  name: measured-detector-hrnet-large-v3grid
   note: >
-    Measured-detector retrain. Gains RANDOMISED per image (CHANGE 1) for robustness
+    Measured-detector retrain #2. Gains RANDOMISED per image (CHANGE 1) for robustness
     to a future PMT-voltage change; intensity range SOLVED per image so no spot clips
-    either channel (CHANGE 2); realistic constant ~2-photon background (CHANGE 3).
+    either channel (CHANGE 2); realistic constant ~2-photon background (CHANGE 3);
+    density support widened to 0.030 to contain the benchmark-v3 density axis (CHANGE 4).
 
 seed: 0
 
@@ -64,8 +96,15 @@ simulator:
   scene:
     density:
       min: 0.0006
-      max: 0.012
-    oversample_dense_fraction: 0.3
+      # CHANGE 4 (2026-07-14): 0.012 -> 0.030 spots/px.
+      # The benchmark-v3 density axis tops out at 0.025 (1,638 spots per 256^2 image --
+      # the point at which mean nearest-neighbour distance, 3.2 px, drops BELOW the ch2
+      # PSF FWHM of 3.96 px and neighbouring spots are physically merged). Training to
+      # 0.030 keeps that top cell inside the support with headroom instead of on the
+      # boundary. Verify with: python scripts/coverage_probe.py
+      # (tests/test_density_coverage.py pins this against configs/benchmark.yaml.)
+      max: 0.030
+    oversample_dense_fraction: 0.3   # 30% of images redrawn from the upper density octave
     ratio_law:
       alpha:       {min: -0.7, max: 0.7}     # sim_intercept
       beta:        {min: -0.6, max: 0.6}     # sim_log_slope -> physical alpha in [-1.2, 1.2]
@@ -74,7 +113,9 @@ simulator:
       sigma1:            {min: 1.0, max: 1.8}
       c2_sigma_mismatch: {min: 1.05, max: 1.35}
     registration_shift:
-      max_px: 1.0
+      max_px: 1.0                            # TRAINING augmentation only -- the BENCHMARK
+                                             # pins this to 0 (_ZERO_REGISTRATION). Do not
+                                             # "harmonise" them; see VENDORED_NOTES.md.
     background:                              # realistic ~2 photons, small jitter; flat only
       level:          {min: 1.0, max: 4.0}
       gradient_frac:  {min: 0.0, max: 0.0}
@@ -106,10 +147,15 @@ training:
   # CHANGE 2 -- per-image saturation-safe intensity window. The ceiling (log10_max) is
   # solved per image from the sampled gains + PSF + ratio law so no spot clips either
   # channel; the curriculum ramps the dim tail below it (bright-only -> full span).
+  #
+  # NOTE (coverage probe, 2026-07-14): this window ALREADY reaches down to 3 photons and
+  # up to ~18,000, so it covers the benchmark-v3 SNR axis (12.7 - 77.6 ph) end to end.
+  # It is also DENSITY-INDEPENDENT -- solve_a1_ceiling never sees density. Do not "fix" a
+  # brightness-density coupling here; there isn't one (docs/coverage_probe_findings.md).
   intensity_window:
     full_decades: 2.0            # dim-tail span (log10 photons) below the ceiling at full difficulty
     full_dim_bias: 1.6           # dim over-sampling at full difficulty (curriculum ramps 1 -> this)
-    floor_a1_photons: 3.0        # covers benchmark-v2 dim curvature spots (alpha=+1.2 dips to ~2.9 ph)
+    floor_a1_photons: 3.0        # covers the dim curvature spots (alpha=+1.2 dips to ~2.9 ph)
     target_frac: 0.85            # brightest spot's clean gained peak <= this * knee (headroom)
     scatter_sigmas: 3.5          # cover the upper tail of the per-spot log-ratio scatter
 
@@ -125,13 +171,28 @@ training:
     n_images: 24
     n_hard_corner: 10
 
-benchmark:                       # inference + hard-corner definition (shared evaluator)
+benchmark:                       # inference + hard-corner definition (training-time val only;
+                                 # the REAL benchmark strata come from BENCH_MANIFEST.json)
   match_radius_px: 3.0
   match_method: greedy
-  snr_bins:     [0.0, 2.0, 5.0, 10.0, 20.0, 50.0, .inf]
-  density_bins: [0.0, 1.0, 3.0, 6.0, .inf]
+  # SNR bins re-cut for the v3 range. The old edges [0, 2, 5, 10, 20, 50, inf] were built
+  # for the v2 grid; against the live range (0.75 - 3.0) they would dump nearly every spot
+  # into the first bin and the training-time val stratification would go blind exactly where
+  # the benchmark now discriminates.
+  snr_bins:     [0.0, 0.75, 1.25, 2.0, 3.0, 5.0, .inf]
+  density_bins: [0.0, 1.0, 3.0, 6.0, .inf]   # LOCAL neighbour counts (not spots/px)
   density_radius_px: 4.0
   our_model:
+    # peak_threshold 0.3 is KNOWN too permissive (precision 0.547 -> 0.995 at 0.7 with NO
+    # recall cost; scripts/threshold_sweep.py). It is deliberately NOT retuned here: the
+    # retune must run on a VALIDATION set drawn from the TRAINING distribution, never on
+    # the benchmark, and it must be redone for the NEW checkpoint. Do it after the retrain
+    # and write the chosen value into the checkpoint config, then apply the SAME protocol
+    # to every baseline or the comparison is rigged (handoff_retrain_intensity_head.md Sec.4).
     peak_threshold: 0.3
     nms_kernel: 3
-    max_spots: 2000
+    # Raised 2000 -> 3000: at the new density max (0.030) a 256^2 training image holds
+    # ~1,966 spots and the benchmark's top cell holds 1,638. A 2000 cap would have begun
+    # silently truncating the densest val images -- which is precisely the regime the whole
+    # grid change exists to measure.
+    max_spots: 3000

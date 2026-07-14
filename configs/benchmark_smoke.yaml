@@ -1,7 +1,11 @@
-# Smoke benchmark v2: tiny counts, must generate in < a few seconds (pipeline
-# test). Reuses smoke.yaml's simulator block (small images, same scene base) by
-# reference, then OVERRIDES the detector with the MEASURED per-channel constants
-# so smoke exercises the same detector as the full benchmark. No absolute paths.
+# Smoke benchmark v3: tiny counts, must generate in < a few seconds (pipeline test).
+# Reuses smoke.yaml's simulator block (small images, same scene base) by reference, then
+# OVERRIDES the detector with the MEASURED per-channel constants so smoke exercises the
+# same detector as the full benchmark. No absolute paths.
+#
+# The GRID MUST MIRROR configs/benchmark.yaml (same snr_targets, same density_levels) --
+# tests/test_density_coverage.py asserts it. If the smoke grid drifts off the real grid,
+# the tests stop testing the thing that ships.
 
 base_simulator_config: smoke.yaml   # relative to configs/; its `simulator:` block is used
 
@@ -31,13 +35,18 @@ benchmark:
   image:
     height: 80
     width: 80
-  # A tiny SNR x density grid: 6 SNR targets x 5 densities = 30 cells, 2 imgs each.
-  # SNR grid [2,3,5,8,10,15] (same as full benchmark) -- capped below the protein
-  # ADC clip (SNR ~= 16.8 at the chosen gain 40) so no cell clips either channel;
-  # density=0.015 exercises the density-stress flag (above the legacy max).
+  # A tiny SNR x density grid: 6 SNR targets x 7 densities = 42 cells, 2 imgs each.
+  # v3 grid (see configs/benchmark.yaml and docs/benchmark_grid_requirements.md for the
+  # measured evidence): SNR moved DOWN onto the live detection range (0.75 - 3.0, i.e.
+  # 12.7 - 77.6 photons/spot), density extended UP to 0.025 where the mean
+  # nearest-neighbour distance falls below the ch2 PSF FWHM and spots physically merge.
   # Constant SNR per cell, constant density per cell, uniform placement, no clustering.
-  snr_targets:    [2, 3, 5, 8, 10, 15]
-  density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015]
+  #
+  # NOTE on the 80x80 smoke image: at density 0.025 that is only 160 spots, and the
+  # border fraction is much larger than at 256x256 -- smoke checks the WIRING (constant
+  # density/SNR invariants, no clipping, schema), never the SCIENCE.
+  snr_targets:    [0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+  density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015, 0.02, 0.025]
   density_radius_px: 4.0
   images_per_cell: 2   # >1 so the constant-per-cell area-density + SNR invariants are exercised
 

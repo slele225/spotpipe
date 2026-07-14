@@ -19,6 +19,7 @@ import pytest
 from spotpipe.benchmark.alpha import alpha_to_sim_slope, sim_slope_to_alpha
 from spotpipe.benchmark.generate import (
     BenchmarkConfig,
+    _edge_label,
     generate_benchmark,
     load_benchmark_config,
 )
@@ -49,19 +50,25 @@ def test_alpha_convention_roundtrip(alpha):
 # --------------------------------------------------------------------------- #
 def test_snr_density_cell_reloads_and_is_schema_valid(smoke_bench):
     out, _manifest, cfg = smoke_bench
-    cell = out / "snr_density" / "snr=5_density=0.006"   # density labelled in spots/px
+    # Pick the cell FROM THE CONFIG rather than hardcoding a label. The grid is a measured,
+    # revisable thing (v2 -> v3 moved SNR from [2..15] down to [0.75..3.0]); a hardcoded
+    # "snr=5_density=0.006" turns any legitimate grid change into a spurious test failure,
+    # which trains people to edit the test until it passes. Mid-grid keeps it representative.
+    snr = cfg.snr_targets[len(cfg.snr_targets) // 2]
+    dens = cfg.density_levels[len(cfg.density_levels) // 2]
+    cell = out / "snr_density" / f"snr={_edge_label(snr)}_density={_edge_label(dens)}"
     meta = json.loads((cell / "meta.json").read_text())
 
     assert meta["family"] == "snr_density"
     assert meta["n_images"] == cfg.images_per_cell
     assert meta["true_alpha"] == 0.0  # neutral zero-scatter ratio law
     # TRUE constant-SNR: target recorded, intensity solved, ch1 == ch2.
-    assert meta["target_snr"] == pytest.approx(5.0)
+    assert meta["target_snr"] == pytest.approx(snr)
     assert meta["solved_intensity_photons"] > 0
     assert meta["solved_A1_photons"] == meta["solved_A2_photons"]
     # density axis is a constant area density in spots/px, used as the label.
-    assert meta["area_density_spots_per_px"] == pytest.approx(0.006)
-    assert meta["condition"]["area_density_spots_per_px"] == pytest.approx(0.006)
+    assert meta["area_density_spots_per_px"] == pytest.approx(dens)
+    assert meta["condition"]["area_density_spots_per_px"] == pytest.approx(dens)
 
     gt_files = sorted((cell / "ground_truth").glob("gt_*.csv"))
     img_files = sorted((cell / "images").glob("image_*.tif"))
@@ -114,20 +121,32 @@ def test_snr_density_is_true_constant_snr(smoke_bench):
 
 
 def test_snr_density_solved_intensity_table_and_no_clip(smoke_bench):
-    # Change 6 + decision 1: manifest carries the solved-intensity-per-SNR-cell
-    # table, every cell is UNCLIPPED (positive ADC headroom, both channels), and
-    # the capped grid stays within the legacy training range (no OOD flags).
+    # The manifest carries the solved-intensity-per-SNR-cell table and EVERY cell must be
+    # UNCLIPPED on both channels (positive ADC headroom). That invariant is permanent.
+    #
+    # What is NOT permanent: whether a cell sits inside the LEGACY checkpoints' [20, 7943]
+    # photon range. The v3 grid deliberately reaches DOWN to 12.7 photons (SNR 0.75) --
+    # below the legacy floor -- because that is where detection actually discriminates
+    # (docs/benchmark_grid_requirements.md). Those cells are correctly FLAGGED as
+    # out-of-range for the LEGACY checkpoints. The measured-detector model trains down to
+    # 3 photons and covers them (docs/coverage_probe_findings.md), so the flag is a
+    # statement about the legacy checkpoints, not about the grid being wrong.
+    #
+    # So: assert the flag fires EXACTLY when the cell leaves the legacy range -- never
+    # assert it is always absent.
     out, manifest, cfg = smoke_bench
     table = manifest["solved_intensity_table"]
     assert {row["target_snr"] for row in table} == {float(s) for s in cfg.snr_targets}
     for row in table:
         A = row["solved_intensity_photons"]
-        # capped grid [2,3,5,8]: unclipped on both channels, in the legacy range.
         assert row["ch1_saturates"] is False and row["ch2_saturates"] is False
         assert row["ch1_headroom_adu"] > 0 and row["ch2_headroom_adu"] > 0
-        assert row["in_legacy_training_distribution"] is (20.0 <= A <= 7943.0)
-        assert row["flag"] is None
-        assert row["ch1_saturates"] is False
+
+        in_legacy = 20.0 <= A <= 7943.0
+        assert row["in_legacy_training_distribution"] is in_legacy
+        # flag <=> outside the legacy range. Both directions, so neither a missing flag nor
+        # a spurious one can slip through.
+        assert (row["flag"] is None) is in_legacy
 
 
 def test_snr_density_clipping_target_fails_loud():

@@ -93,7 +93,15 @@ def _make_condition(root, family, label, n_images, shape=(2, 20, 20)):
     return cdir
 
 
-def _fake_checkpoint(root, name):
+# A checkpoint's provenance (LEGACY vs clean retrain) is DERIVED from its recorded
+# training SHA, so the fake checkpoints must carry a real one. Default = the OLD
+# dirty-tree SHA, which is what the two carried legacy checkpoints record and what
+# the ``our_model_<name>_legacy`` folder naming below asserts.
+_LEGACY_SHA = "93fc0aa8c6b245c3c2294a995a3c172d55064f57-dirty"
+_CLEAN_SHA = "26b0d487d16d6516082f20cf03a5a56a1e8e3f9b"
+
+
+def _fake_checkpoint(root, name, git_commit: str = _LEGACY_SHA):
     ckdir = root / name
     ckdir.mkdir(parents=True, exist_ok=True)
     model = _tiny_model(seed=abs(hash(name)) % 1000)
@@ -103,8 +111,40 @@ def _fake_checkpoint(root, name):
                                                        "nms_kernel": 3, "max_spots": 50}}}},
                ckdir / "best_checkpoint.pt")
     with open(ckdir / "manifest.json", "w", encoding="utf-8") as fh:
-        json.dump({"git_commit": "deadbeef-dirty"}, fh)
+        json.dump({"git_commit": git_commit}, fh)
     return name
+
+
+def test_provenance_is_derived_from_training_sha():
+    """LEGACY is a fact about the training SHA, never a hardcoded label."""
+    assert infer.is_legacy_checkpoint(_LEGACY_SHA) is True
+    assert infer.is_legacy_checkpoint("unknown") is True       # unprovenanced -> fail safe
+    assert infer.is_legacy_checkpoint("") is True
+    assert infer.is_legacy_checkpoint(_CLEAN_SHA) is False
+
+    assert infer.method_name("hrnet_large", _LEGACY_SHA) == "our_model_hrnet_large_legacy"
+    assert (infer.method_name("hrnet_large_measured", _CLEAN_SHA)
+            == "our_model_hrnet_large_measured")
+
+
+def test_clean_retrain_is_not_labelled_legacy(tmp_path):
+    """A clean-tree checkpoint gets a plain folder + a HEADLINE manifest status."""
+    bench = _bench(tmp_path)
+    ckroot = tmp_path / "checkpoints"
+    _fake_checkpoint(ckroot, "hrnet_large_measured", git_commit=_CLEAN_SHA)
+    results = tmp_path / "results"
+    infer.run_inference(
+        "hrnet_large_measured", bench_root=bench, results_root=results, repo_root=tmp_path,
+        checkpoints_root=ckroot, device="cpu", batch_size=2, num_workers=0,
+        smoke=True, smoke_conditions=1, smoke_images=2, log_fn=lambda *_: None)
+
+    method_dir = results / "our_model_hrnet_large_measured"
+    assert method_dir.is_dir()
+    assert not (results / "our_model_hrnet_large_measured_legacy").exists()
+    manifest = json.loads((method_dir / "RUN_MANIFEST.json").read_text())
+    assert manifest["provenance"]["status"] == "CLEAN RETRAIN/HEADLINE"
+    assert manifest["provenance"]["training_git_sha"] == _CLEAN_SHA
+    assert "NOT legacy" in manifest["provenance"]["note"]
 
 
 def _bench(tmp_path):
@@ -131,7 +171,7 @@ def test_smoke_run_writes_valid_csvs_and_manifest(tmp_path):
 
     # Provenance honesty recorded.
     assert manifest["provenance"]["status"] == "LEGACY/REFERENCE"
-    assert manifest["provenance"]["training_git_sha"] == "deadbeef-dirty"
+    assert manifest["provenance"]["training_git_sha"] == _LEGACY_SHA
     assert manifest["checkpoint"] == "hrnet_large"
     assert "device" in manifest and "cuda_available" in manifest
 

@@ -47,3 +47,30 @@ docstring; it documents reporting conventions only (no logic change):
   manifest `git_commit` field now records THIS repo's SHA (correct behaviour).
 * `simulator/benchmark_set.py` imports `tifffile` (raw-channel TIFF export);
   it is in the dependency list.
+
+* **`simulator/forward_model.py::sample_scene_params` — `registration_shift.max_px`
+  DEFAULTS TO 1.0.** (Found 2026-07-13 while adapting cmeAnalysis.) It draws an
+  INDEPENDENT per-image, per-channel shift `~ U(-max_px, +max_px)` and renders
+  channel *k* at `spot + shift_k`, while the ground truth stores the **scene**
+  position. With a nonzero shift, GT therefore marks a point the photons are not
+  centred on — in *either* channel — and the shift is recorded nowhere.
+
+  Because the default is 1.0 rather than 0.0, this was silently ON in the benchmark
+  although no benchmark config ever requested it. Symptom: cmeAnalysis's
+  localization residual came out at sd 0.569/0.581 px per axis, **flat across a 25x
+  intensity range** (so not photon-limited — not localization error at all).
+  `U(-1,1)` has sd `1/sqrt(3) = 0.577`. That was the entire residual.
+
+  Why it mattered: a single-channel detector sits a mean 0.765 px from GT however
+  well it fits, while a two-channel method can average its two views and land
+  0.521 px away — **1.47x closer for free**, flattering our own model against every
+  single-channel baseline. And `sqrt(2) = 1.414 px` of the evaluator's 1.68 px match
+  radius is consumed before any noise.
+
+  **Vendored code UNTOUCHED, per the rules.** Fixed in the DISPOSABLE layer:
+  `benchmark/generate.py` now applies `_ZERO_REGISTRATION` (`max_px: 0.0`,
+  explicit — omission would re-inherit the 1.0 default) to every set in both
+  families, alongside `_FIXED_PSF` / `_CONSTANT_BACKGROUND`. Guarded by
+  `tests/test_benchmark_registration.py`. Random shift remains legitimate TRAINING
+  augmentation in the training configs; it simply must not be in a benchmark's
+  ground truth. A benchmark measures; it does not randomise.

@@ -22,7 +22,7 @@ import numpy as np
 
 from spotpipe.benchmark.darkcount_check import DarkCountConfig, run_darkcount_check
 from spotpipe.benchmark.generate import load_benchmark_config
-from spotpipe.benchmark.infer import load_checkpoint
+from spotpipe.benchmark.infer import is_legacy_checkpoint, load_checkpoint
 from spotpipe.paths import get_paths
 from spotpipe.simulator import noise
 
@@ -48,7 +48,10 @@ def main(argv: list[str] | None = None) -> int:
           f"offset={detector.ch2.offset} adc_max={detector.adc_max}")
 
     bundle = load_checkpoint(args.checkpoint, checkpoints_root=paths.checkpoints, repo_root=paths.root)
-    print(f"[darkcount] checkpoint={args.checkpoint} (LEGACY reference) "
+    tag = ("LEGACY reference" if is_legacy_checkpoint(bundle.training_git_sha)
+           else "clean retrain / headline")
+    print(f"[darkcount] checkpoint={args.checkpoint} ({tag}, "
+          f"training_git_sha={bundle.training_git_sha}) "
           f"peak_threshold={bundle.params.peak_threshold} nms_kernel={bundle.params.nms_kernel}")
 
     dc_cfg = DarkCountConfig(height=args.height, width=args.width, n_images=args.n_images, rate=args.rate)

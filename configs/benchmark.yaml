@@ -1,11 +1,18 @@
-# Full benchmark v2: real sizes. Reuses default.yaml's simulator block (256x256,
-# vendored scene ranges) by reference, then OVERRIDES the detector with the
-# MEASURED per-channel instrument constants (2026-07-13). Generation only -- no
-# method runs, no slope fit, no metric (see src/spotpipe/benchmark/generate.py).
+# Full benchmark v3: RE-CENTRED SNR + DENSITY AXES. Reuses default.yaml's simulator
+# block (256x256, vendored scene ranges) by reference, then OVERRIDES the detector
+# with the MEASURED per-channel instrument constants (2026-07-13). Generation only --
+# no method runs, no slope fit, no metric (see src/spotpipe/benchmark/generate.py).
 #
 # Modifies ONLY the disposable benchmark layer: the measured detector is applied
 # here via `simulator_overrides` so the TRAINING configs (default.yaml/smoke.yaml,
 # which the frozen checkpoints depend on) stay untouched. Nothing vendored changes.
+#
+# v3 CHANGE (2026-07-14) -- see docs/benchmark_grid_requirements.md for the measured
+# evidence behind every number here. In one line: the v2 SNR axis measured NOTHING
+# (all six levels sat on a saturated plateau, 1.5 F1 points of spread across a 7.5x
+# SNR range) and the v2 density axis STOPPED exactly where the physics starts (its
+# ceiling, 0.015, sits at mean-nearest-neighbour == 1.0 x PSF FWHM, the ONSET of
+# overlap). Both axes are repositioned onto the live range.
 
 base_simulator_config: default.yaml   # relative to configs/; its `simulator:` block is used
 
@@ -31,8 +38,12 @@ simulator_overrides:
       # saturates the protein channel at ~32 photons peak and forced the benchmark into a
       # single-photon regime. We intend to lower the PMT voltage to avoid this, so the
       # benchmark simulates the settings we will ACTUALLY USE. Re-measure the gain at the
-      # voltage finally used. (gain 40 -> protein clips at ~4095/40 ~= 100 photons peak,
-      # ~20x read-noise sigma per PE, and is inside the retrain's randomized gain [20,150].)
+      # voltage finally used.
+      #
+      # v3 NOTE: the ADC-clip ceiling this gain imposes (ch2 clips near SNR ~= 16.8) is now
+      # MOOT -- the new SNR grid tops out at 3.0, nowhere near the knee. The no-clip
+      # assertion in the generator STAYS anyway (it is a cheap invariant, and it is what
+      # would catch a future grid edit that walks back up into the clip).
       gain: 40.0                       # CHOSEN (planned lower-voltage), NOT measured; measured=124.3
       offset: 154.0                    # ADU, shared digitizer pedestal (measured)
       excess_noise_factor: 1.0
@@ -43,29 +54,68 @@ benchmark:
   seed: 0
   # image size defaults to the base (256x256); override here if desired.
 
-  # Family 1 -- SNR x density. SNR = TRUE constant-SNR target levels: for each,
-  # the single spot intensity is SOLVED by inverting the frozen _features SNR
-  # given the FIXED PSF, CONSTANT 2-photon background and MEASURED detector, so
-  # every spot in a cell has identical SNR (zero spread). Density = CONSTANT AREA
-  # DENSITY levels in spots/px (the knob AND the label; no clustering, uniform
-  # placement), swept across and slightly beyond the training range. Full
-  # orthogonal grid: 4 SNR x 5 density = 20 cells.
+  # Family 1 -- SNR x density. SNR = TRUE constant-SNR target levels: for each, the
+  # single spot intensity is SOLVED by inverting the frozen _features SNR given the
+  # FIXED PSF, CONSTANT 2-photon background and MEASURED detector, so every spot in a
+  # cell has identical SNR (zero spread). Density = CONSTANT AREA DENSITY levels in
+  # spots/px (the knob AND the label; no clustering, uniform placement).
+  # Full orthogonal grid: 6 SNR x 7 density = 42 cells x 50 images = 2,100 images.
+
+  # ---- SNR axis: MOVED DOWN onto the live range (v2 was [2, 3, 5, 8, 10, 15]) ----
+  # Measured with cmeAnalysis (given sigma, density 0.002, >=6 px border excluded):
+  # the ENTIRE dynamic range is SNR 0.75 -> 2.0 (13 -> 43 photons/spot).
+  #   SNR 0.5  ->  8 ph -> recall 0.011   (detector is blind; no statistical power)
+  #   SNR 0.75 -> 13 ph -> recall 0.102
+  #   SNR 1.0  -> 18 ph -> recall 0.335
+  #   SNR 1.25 -> 23 ph -> recall 0.645
+  #   SNR 1.5  -> 29 ph -> recall 0.869
+  #   SNR 2.0  -> 43 ph -> recall 0.950
+  #   SNR 3.0  -> 78 ph -> recall 0.953   (plateau begins; kept as the "everyone is
+  #                                        fine here" anchor so the plateau stays visible)
+  # On the v2 grid the same tool scored F1 .919/.929/.932/.934/.934/.933 across SNR
+  # 2->15: 1.5 points of spread across 7.5x. That axis was inert.
+  # 50% recall point: SNR ~= 1.1 (~20 photons/spot) -- the detector's noise limit.
+  # 0.5 is deliberately NOT included: 1.1% recall yields almost no matched spots, so
+  # the alpha fit is ill-conditioned. It is a floor demonstration, not a measurement.
   #
-  # SNR grid CAPPED below the protein-ADC clip. At the CHOSEN protein gain 40
-  # (planned lower-voltage acquisition; the measured 750 V gain is 124.3), the ch2
-  # peak pixel hits the 12-bit ADC ceiling near ~100 photons (SNR ~= 16.8). The
-  # grid [2, 3, 5, 8, 10, 15] stays under that with headroom (SNR=15 leaves ~783
-  # ADU / ~20% headroom); SNR 17+ would clip. Generation ASSERTS no cell clips
-  # either channel. (Gain 40 lifts the benchmark out of the single-photon regime
-  # the measured 124.3 forced -- see simulator_overrides note and snr_convention.md.)
-  snr_targets:    [2, 3, 5, 8, 10, 15]
-  density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015]
+  # NOTE the failure MODE: cmeAnalysis precision holds >=0.93 all the way down to SNR
+  # 0.75 -- it fails by going BLIND, not by hallucinating. So a learned detector's win
+  # at low SNR must be a RECALL win, and there is a lot on the table (at SNR 1.0,
+  # 2,750 of 3,930 real spots are missed).
+  snr_targets:    [0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+
+  # ---- DENSITY axis: EXTENDED UP to where PSFs physically merge (v2 stopped at 0.015) ----
+  # The density axis is really sweeping mean nearest-neighbour distance against PSF
+  # width. PSF FWHM: ch1 = 3.30 px, ch2 = 3.96 px.
+  #   density  spots/256^2  mean NN dist  NN / FWHM(ch2)  recall (measured)
+  #   0.0006        39        20.4 px         5.16            0.983
+  #   0.002        131        11.2 px         2.83            0.961
+  #   0.006        393         6.5 px         1.63            0.894
+  #   0.012        786         4.6 px         1.15            0.801
+  #   0.015        983         4.1 px         1.03            0.761   <- v2 ceiling: the
+  #                                                                      ONSET of overlap
+  #   0.02        1311         3.5 px         0.89            ~0.7 (PSFs overlap)
+  #   0.025       1638         3.2 px         0.80            ~0.6-0.7 (PSFs MERGED)
+  # At 0.025 the mean neighbour separation (3.2 px) is BELOW the ch2 PSF FWHM (3.96 px):
+  # neighbours are physically merged and a local-max detector cannot separate them even
+  # in principle. That is the right place to stop. Recall is still falling steeply at the
+  # v2 ceiling (-0.04 per +0.003 density) -- nowhere near a floor -- so the axis stays
+  # informative all the way to the top.
+  #
+  # THIS IS WHERE THE MODEL'S CLAIM LIVES. cmeAnalysis is at ceiling in sparse fields
+  # (recall 0.983, precision 0.990 at 0.0006) -- there is nothing to beat there, and any
+  # "win" claimed in that regime is noise. The headroom is entirely in crowding: ~24
+  # recall points at density >= 0.012, against a precision that is already 0.99.
+  density_levels: [0.0006, 0.002, 0.006, 0.012, 0.015, 0.02, 0.025]
+
   density_radius_px: 4.0   # informational realised-neighbour stat only
   images_per_cell: 50
 
-  # Family 2 -- curvature. Full alpha range + dense-near-zero (union, 0 once).
-  # true_alpha is realised via pinned sim_log_slope = alpha / 2. Wide A1 spread is
-  # preserved (sized per set); adopts the same FIXED PSF + CONSTANT background.
+  # Family 2 -- curvature. UNCHANGED by v3. Full alpha range + dense-near-zero (union,
+  # 0 once). true_alpha is realised via pinned sim_log_slope = alpha / 2. Wide A1 spread
+  # is preserved (sized per set); adopts the same FIXED PSF + CONSTANT background, and
+  # runs at an EASY operating point (high SNR, low density) so slope recovery is tested
+  # in ISOLATION from detection failure and overlap contamination.
   alpha_values: [-1.2, -0.9, -0.6, -0.3, -0.15, -0.075, 0.0, 0.075, 0.15, 0.3, 0.6, 0.9, 1.2]
   images_per_alpha: 50
   null_control_multiplier: 3   # alpha=0 gets 3x images (tight null-control error bars)
