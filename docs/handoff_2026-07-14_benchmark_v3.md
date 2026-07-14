@@ -80,7 +80,24 @@ Remaining suspect: **rarity of the joint corner**. The axes are independent, but
 not populate a corner: P(bright ≈ 5%) × P(dense ≈ 20%) ≈ **1%** of trained spots. `full_dim_bias =
 1.6` over-samples the dim tail, so bright is rare on its own.
 
-## 4. 🔴 LIVE RIGHT NOW — the rarity probe (A100)
+## 4. ✅ DONE — the rarity probe: **REFUTED** (A100 destroyed)
+
+**The probe ran. Rarity is dead too.** Full writeup: **`docs/rarity_probe_findings.md`**. Headlines:
+
+* Flattening the sampler (`full_dim_bias` 1.6 → 1.0) did **not** fix the bright+dense corner — it made
+  it **worse** (−0.524 → −0.832). The "gap" shrank only because the **dim end collapsed**
+  (+0.253 → −0.327), which is the summary statistic being gamed by degrading the baseline.
+* **The big finding:** arm B improved **both channels individually** (logI1 −1.18 → −0.38, logI2
+  −1.85 → −1.28) and made the **RATIO WORSE** (−0.669 → −0.900). The two channels' errors partly
+  **cancel** in the ratio; the flat sampler decorrelated them. **α depends only on the ratio, so
+  per-channel accuracy is NOT the objective.** Any future fix judged on logI1/logI2 MAE will mislead.
+* Cause is now believed to be in the **loss/head** (Gaussian-NLL intensity term; the `logvar` clamp
+  `[-10, 6]` possibly saturating in the crowded corner), **not the data**.
+* **NO 40k retrain was run.** Do not launch one on a sampler change.
+
+*(Historical detail of how the probe was set up, retained below.)*
+
+### Original plan (as run)
 
 `scripts/run_rarity_probe.sh` is running on the rented A100 (`ssh ubuntu@216.81.245.244`, in tmux
 session `probe`, logging to `~/probe.log`). It is a **DIAGNOSTIC, not the retrain**: two 8k-step
