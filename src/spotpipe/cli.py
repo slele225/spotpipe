@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-__all__ = ["main", "run_smoke", "run_bench_gen", "run_infer", "run_train"]
+__all__ = ["main", "run_smoke", "run_bench_gen", "run_infer", "run_train", "run_evaluate"]
 
 
 def run_smoke(config_path: str | Path | None = None, out_dir: str | Path | None = None) -> Path:
@@ -136,6 +136,52 @@ def run_infer(
     return results_root
 
 
+def run_evaluate(
+    results: str | Path | None = None,
+    benchmark: str | Path | None = None,
+    out: str | Path | None = None,
+    *,
+    methods: list[str] | None = None,
+    match_radius_sigma: float = 1.0,
+    oracle: bool = False,
+) -> Path:
+    """Run the ONE shared, blind evaluator over a results root -> metrics CSVs.
+
+    Ingests ``<results>/<method>/{snr_density,curvature}/.../predictions.csv``
+    (whatever ``spotpipe infer`` and the baselines emit) plus the benchmark GT and
+    writes ``<out>/<method>/metrics_by_condition.csv`` + ``alpha_recovery.csv``,
+    the combined cross-method tables, and ``summary_by_method.csv``. Tool-agnostic:
+    the same code path scores every method. With ``--oracle`` it instead scores the
+    GROUND TRUTH as its own predictions (Gate A calibration) and writes an
+    ``oracle_gt/`` folder. See :mod:`spotpipe.benchmark.evaluate`.
+    """
+    import time
+
+    from spotpipe.benchmark.evaluate import evaluate_all, ground_truth_as_predictions
+    from spotpipe.paths import get_paths
+
+    paths = get_paths()
+    bench_root = Path(benchmark) if benchmark else paths.dataset("benchmark")
+    out_dir = Path(out) if out else paths.root / "results"
+
+    t0 = time.perf_counter()
+    if oracle:
+        metrics, alpha = ground_truth_as_predictions(bench_root, match_radius_sigma=match_radius_sigma)
+        mdir = out_dir / "oracle_gt"
+        mdir.mkdir(parents=True, exist_ok=True)
+        metrics.to_csv(mdir / "metrics_by_condition.csv", index=False)
+        alpha.to_csv(mdir / "alpha_recovery.csv", index=False)
+        print(f"[eval] oracle GT-as-predictions -> {mdir}  ({time.perf_counter() - t0:.1f}s)")
+        return out_dir
+
+    results_root = Path(results) if results else paths.output("predictions")
+    result = evaluate_all(bench_root, results_root, out_dir,
+                          methods=methods, match_radius_sigma=match_radius_sigma)
+    print(f"[eval] {len(result['methods'])} method(s) evaluated in "
+          f"{time.perf_counter() - t0:.1f}s -> {out_dir}")
+    return out_dir
+
+
 def run_train(
     config_path: str | Path | None = None,
     out_dir: str | Path | None = None,
@@ -258,6 +304,20 @@ def main(argv: list[str] | None = None) -> int:
     infer.add_argument("--smoke", action="store_true",
                        help="tiny subset (few conditions x few images) for a fast correctness check")
 
+    ev = sub.add_parser("evaluate",
+                        help="run the shared blind evaluator over prediction CSVs -> metrics")
+    ev.add_argument("--results", default=None,
+                    help="results root: <root>/<method>/... (default: outputs/predictions/)")
+    ev.add_argument("--benchmark", default=None,
+                    help="benchmark root dir with GT + BENCH_MANIFEST.json (default: data/benchmark/)")
+    ev.add_argument("--out", default=None, help="metrics output dir (default: results/)")
+    ev.add_argument("--method", action="append", default=None, dest="methods",
+                    help="evaluate only this method folder (repeatable; default: all found)")
+    ev.add_argument("--match-radius-sigma", type=float, default=1.0,
+                    help="match gate in PSF sigma (default: 1.0 x max(sigma1,sigma2))")
+    ev.add_argument("--oracle", action="store_true",
+                    help="Gate A: score ground truth as its own predictions (calibration)")
+
     train_p = sub.add_parser("train",
                              help="train the measured-detector hrnet_large model (or a self-check)")
     train_p.add_argument("--config", default=None,
@@ -288,6 +348,13 @@ def main(argv: list[str] | None = None) -> int:
             args.checkpoint, args.benchmark, args.out,
             device=args.device, batch_size=args.batch_size,
             num_workers=args.num_workers, smoke=args.smoke,
+        )
+        return 0
+    if args.command == "evaluate":
+        run_evaluate(
+            args.results, args.benchmark, args.out,
+            methods=args.methods, match_radius_sigma=args.match_radius_sigma,
+            oracle=args.oracle,
         )
         return 0
     if args.command == "train":

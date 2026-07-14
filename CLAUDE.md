@@ -65,13 +65,15 @@ Three tiers, hardened by how expensive they are to reproduce:
   `sim_log_slope`).
 * **SNR** — `docs/snr_convention.md`. Follow it for all benchmark difficulty-axis labeling and any
   SNR computation. Never substitute a different SNR definition without updating that doc.
-* **Evaluator** — `docs/evaluator_convention.md` *(to be written when the evaluator is built)*.
-  Hungarian matching within ~1 PSF sigma; **unweighted** OLS fit of `log(A2/A1)` vs
-  `log(sqrt(A1))` for alpha (unweighted ON PURPOSE — size-correlated weighting could bias the
-  slope); analytic regression standard error. Unmatched **predictions** must be binned
-  per-stratum so per-bin precision is defined (this was a BUG in the old repo).
-  **ONE shared, blind evaluator for EVERY tool** — no per-tool evaluation code. This is the
-  fairness guarantee.
+* **Evaluator** — `docs/evaluator_convention.md` *(FROZEN; implemented in
+  `src/spotpipe/benchmark/evaluate.py`, CLI `spotpipe evaluate`)*.
+  Hungarian matching within ~1 PSF sigma (`1.0 × max(sigma1, sigma2)`, read from
+  `BENCH_MANIFEST.json`); **unweighted** OLS fit of `log(A2/A1)` vs `log(sqrt(A1))` for alpha
+  (unweighted ON PURPOSE — size-correlated weighting could bias the slope); analytic regression
+  standard error. Unmatched **predictions** are binned per-condition (the condition IS the stratum)
+  so per-cell precision is always defined (this was a BUG in the old repo).
+  **ONE shared, blind evaluator for EVERY tool** — no per-tool evaluation code, no `if method ==`.
+  This is the fairness guarantee. Validated on ground truth (Gates A–D) before any real method.
 
 **Channel mapping (a silent swap here inverts A2/A1 and destroys alpha):**
 pipeline **channel 1 = LIPID (561 nm)**, **channel 2 = PROTEIN (488 nm)** — note this is the
