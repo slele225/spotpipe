@@ -97,7 +97,9 @@ def render_curvature_set(base_config: dict, injected_alpha: float, n_images: int
     det = noise.sample_detector_params(base_config.get("detector", {}),
                                        np.random.default_rng([seed, 314]))
     sims = []
-    for i, child in enumerate(np.random.SeedSequence([seed, 271, int(round(injected_alpha * 1000))]).spawn(n_images)):
+    # SeedSequence entries must be non-negative; alpha can be negative, so offset it.
+    alpha_seed = int(round(injected_alpha * 1000)) + 100000
+    for i, child in enumerate(np.random.SeedSequence([seed, 271, alpha_seed]).spawn(n_images)):
         rng = np.random.default_rng(child)
         scene = forward_model.sample_scene_params(scene_cfg, rng, shape)
         sims.append(forward_model.simulate_image(
