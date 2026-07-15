@@ -569,6 +569,7 @@ def run_inference(
     smoke: bool = False,
     smoke_conditions: int = 2,
     smoke_images: int = 3,
+    peak_threshold: float | None = None,
     log_fn=print,
 ) -> dict:
     """Run one checkpoint over the benchmark; write per-condition CSVs + manifest.
@@ -608,6 +609,16 @@ def run_inference(
 
     for name in names:
         bundle = load_checkpoint(name, checkpoints_root=checkpoints_root, repo_root=repo_root)
+        # Optional inference-time peak_threshold override (retuned OFF-benchmark by
+        # scripts/threshold_retune.py). The threshold is an inference choice, not a
+        # property of the weights, so it is overridden here rather than baked into the
+        # precious checkpoint. Recorded in the manifest via the (overridden) params.
+        if peak_threshold is not None:
+            from dataclasses import replace
+            bundle = replace(bundle, params=replace(bundle.params,
+                                                    peak_threshold=float(peak_threshold)))
+            log_fn(f"[infer] peak_threshold OVERRIDDEN -> {float(peak_threshold)} "
+                   f"(retuned off-benchmark; not the checkpoint's shipped value)")
         method = method_name(name, bundle.training_git_sha)
         legacy = is_legacy_checkpoint(bundle.training_git_sha)
         method_dir = results_root / method

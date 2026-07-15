@@ -108,6 +108,7 @@ def run_infer(
     batch_size: int = 8,
     num_workers: int | None = None,
     smoke: bool = False,
+    peak_threshold: float | None = None,
 ) -> Path:
     """Run a trained checkpoint (or ``all``) over the benchmark -> prediction CSVs.
 
@@ -132,6 +133,7 @@ def run_infer(
         batch_size=batch_size,
         num_workers=num_workers,
         smoke=smoke,
+        peak_threshold=peak_threshold,
     )
     return results_root
 
@@ -303,6 +305,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="DataLoader workers (default: min(cpu_count, 8))")
     infer.add_argument("--smoke", action="store_true",
                        help="tiny subset (few conditions x few images) for a fast correctness check")
+    infer.add_argument("--peak-threshold", type=float, default=None,
+                       help="override the checkpoint's peak_threshold (retuned OFF-benchmark by "
+                            "scripts/threshold_retune.py). Recorded in the run manifest.")
 
     ev = sub.add_parser("evaluate",
                         help="run the shared blind evaluator over prediction CSVs -> metrics")
@@ -348,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
             args.checkpoint, args.benchmark, args.out,
             device=args.device, batch_size=args.batch_size,
             num_workers=args.num_workers, smoke=args.smoke,
+            peak_threshold=args.peak_threshold,
         )
         return 0
     if args.command == "evaluate":
