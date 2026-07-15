@@ -51,7 +51,12 @@ from spotpipe.paths import get_paths
 from spotpipe.simulator import forward_model, noise
 
 # Injected alpha sweep. 0.0 is the NULL CONTROL (rendered with extra images).
-ALPHA_SWEEP = (-0.6, -0.3, 0.0, 0.3, 0.6)
+# QUICK is the fast tiebreaker; FULL matches the benchmark's 13 curvature alphas
+# (incl. the +-1.2 extremes and the dense-near-zero cluster) for a statistically solid
+# overnight readout. Select FULL with --full-sweep.
+ALPHA_SWEEP_QUICK = (-0.6, -0.3, 0.0, 0.3, 0.6)
+ALPHA_SWEEP_FULL = (-1.2, -0.9, -0.6, -0.3, -0.15, -0.075, 0.0, 0.075, 0.15, 0.3, 0.6, 0.9, 1.2)
+ALPHA_SWEEP = ALPHA_SWEEP_QUICK  # default; overridden by --full-sweep in main()
 MATCH_RADIUS = 1.0 * max(_BENCH_SIGMA1, _BENCH_SIGMA2)
 MIN_ALPHA_DECADES = 1.0
 
@@ -115,8 +120,13 @@ def main() -> int:
     ap.add_argument("--null-multiplier", type=int, default=3, help="extra images for alpha=0")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--full-sweep", action="store_true",
+                    help="use the benchmark's 13 curvature alphas (incl. +-1.2 and dense-near-zero) "
+                         "for a statistically solid readout; default is the quick 5-point sweep")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    sweep = ALPHA_SWEEP_FULL if args.full_sweep else ALPHA_SWEEP_QUICK
 
     import torch
     from spotpipe.benchmark.infer import load_checkpoint
@@ -140,7 +150,7 @@ def main() -> int:
     print(f"match      : {MATCH_RADIUS:.2f} px   scatter={_CURVATURE_SCATTER_STD}\n")
 
     rows = []
-    for a in ALPHA_SWEEP:
+    for a in sweep:
         n = args.n_images * (args.null_multiplier if a == 0.0 else 1)
         sims = render_curvature_set(base_config, a, n, args.seed)
         li1, li2 = [], []
