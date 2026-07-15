@@ -478,7 +478,13 @@ def _run_conditions(
         collate_fn=_collate,
     )
 
-    model = bundle.model
+    # Move the model to the compute device. `load_checkpoint` only calls model.eval()
+    # (it does not know the device), and the input batch is sent to `device` below, so
+    # without this the weights stay on CPU and a --device cuda run dies with
+    # "Input type (cuda) and weight type (cpu) should be the same". predict_spots does
+    # its own model.to(device); the batched decode path must do the same.
+    model = bundle.model.to(device)
+    model.eval()
     params = bundle.params
     is_cuda = device.type == "cuda"
 
