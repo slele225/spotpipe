@@ -57,8 +57,8 @@ def main() -> int:
     import torch
     from spotpipe.benchmark.infer import load_checkpoint
     from spotpipe.models.spot_model import predict_spots
-    from spotpipe.training.dataset import build_eval_examples
-    from spotpipe.training.intensity_window import DetectorConstants, IntensityWindowConfig
+    from spotpipe.training.dataset import IntensityWindowConfig, build_eval_examples
+    from spotpipe.training.intensity_window import DetectorConstants
 
     paths = get_paths()
     train_cfg = yaml.safe_load(open(paths.root / args.train_config, encoding="utf-8"))
