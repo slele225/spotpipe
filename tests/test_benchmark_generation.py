@@ -35,6 +35,24 @@ def smoke_bench(tmp_path_factory):
     return out, manifest, cfg
 
 
+def test_regeneration_clears_stale_cells(tmp_path):
+    # A grid change must not leave orphan cell dirs behind (the v2->v3 footgun: SNR 5/8/10/15
+    # cells persisting after the axis moved, then silently ingested downstream). Plant a fake
+    # stale cell + a stale curvature set, regenerate, and require both to be gone.
+    base_config, cfg = load_benchmark_config(get_paths().configs / "benchmark_smoke.yaml")
+    (tmp_path / "snr_density" / "snr=999_density=0.5").mkdir(parents=True)
+    (tmp_path / "snr_density" / "snr=999_density=0.5" / "meta.json").write_text("{}")
+    (tmp_path / "curvature" / "alpha=9.9").mkdir(parents=True)
+
+    generate_benchmark(base_config, cfg, tmp_path, log_fn=lambda *_: None)
+
+    assert not (tmp_path / "snr_density" / "snr=999_density=0.5").exists(), "stale cell survived regen"
+    assert not (tmp_path / "curvature" / "alpha=9.9").exists(), "stale curvature set survived regen"
+    # and the real cells ARE there
+    n_cells = len(cfg.snr_targets) * len(cfg.density_levels)
+    assert len(list((tmp_path / "snr_density").iterdir())) == n_cells
+
+
 # --------------------------------------------------------------------------- #
 # Convention wiring (pure, no generation)                                     #
 # --------------------------------------------------------------------------- #

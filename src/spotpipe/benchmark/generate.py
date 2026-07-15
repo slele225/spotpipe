@@ -51,6 +51,7 @@ import copy
 import hashlib
 import json
 import math
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1021,6 +1022,21 @@ def generate_benchmark(
     base_config = _deep_merge(base_config, {"image": {"height": cfg.height, "width": cfg.width}})
 
     log_fn(f"[bench] generating into {bench_root} (seed={cfg.seed})")
+
+    # Wipe the two family trees FIRST so a grid change cannot leave orphan cells behind.
+    # bench-gen is deterministic and non-resumable -- it OVERWRITES a cell whose label
+    # collides but does NOT remove a cell whose label is no longer in the grid. So after
+    # shrinking or re-centring an axis (e.g. v2 SNR [2..15] -> v3 [0.75..3.0], which drops
+    # the 5/8/10/15 cells), the stale cells would persist and be silently ingested by
+    # infer / evaluate / the baselines -- a mixed-grid result that looks fine and is wrong.
+    # Regenerating from an empty tree is the only guarantee the tree matches THIS cfg.
+    for _fam in ("snr_density", "curvature"):
+        _fam_dir = bench_root / _fam
+        if _fam_dir.exists():
+            _n_stale = sum(1 for _p in _fam_dir.iterdir() if _p.is_dir())
+            shutil.rmtree(_fam_dir)
+            log_fn(f"[bench] cleared {_n_stale} existing cell(s) under {_fam}/ (fresh regen)")
+
     log_fn("[bench] family 1: SNR x density")
     fam1 = generate_snr_density_family(base_config, cfg, bench_root / "snr_density", log_fn=log_fn)
     log_fn("[bench] family 2: curvature (alpha recovery)")
