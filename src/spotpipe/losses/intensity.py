@@ -81,19 +81,50 @@ def intensity_nll(
     logvar_max: float = 6.0,
     use_logvar: bool = True,
 ) -> dict[str, torch.Tensor]:
-    """Per-channel masked Gaussian NLL on ``logI1`` and ``logI2``.
+    """Per-quantity masked Gaussian NLL on the head's NATIVE intensity predictions.
 
-    Returns ``{"intensity1": NLL_ch1, "intensity2": NLL_ch2}`` so the combiner
-    can log and weight the channels (here, equally). ``use_logvar`` is the
-    variance-warmup switch (see :func:`gaussian_nll_masked`). NO ratio/slope term.
+    Returns ``{"intensity1": NLL_a, "intensity2": NLL_b}`` so the combiner can log
+    and weight the two terms (equally). ``use_logvar`` is the variance-warmup switch
+    (see :func:`gaussian_nll_masked`). NO ratio-SLOPE term -- see below.
+
+    **Auto-routing by head parameterisation.** The loss trains on whatever the head
+    NATIVELY predicts, detected from the preds dict, so the frozen loss combiner
+    (:class:`spotpipe.losses.SpotLoss`) needs no change:
+
+    * independent head -> supervise ``logI1`` and ``logI2`` (the original behaviour).
+    * delta head (``"delta"`` in preds) -> supervise ``logI1`` and ``delta`` (the
+      per-spot log-ratio target ``logI2 - logI1``). ``logI2`` is derived downstream
+      and is NOT supervised here, so it is never double-counted.
+
+    The ``delta`` target is a PER-SPOT quantity, identical in kind to ``logI1``: no
+    cross-spot regression, no in-batch slope, no size-dependent weighting, and the
+    model never sees alpha. This is NOT the forbidden slope loss (CLAUDE.md Durable
+    Rule 3); see ``docs/intensity_head_fix_proposal.md`` Sec.4.
+
+    The two returned keys stay ``intensity1`` / ``intensity2`` in BOTH modes so
+    downstream logging/weighting is structurally unchanged; in delta mode
+    ``intensity2`` is the NLL on ``delta`` (the log-ratio), not on ``logI2``.
     """
     mask = targets["center_mask"]
     nll1 = gaussian_nll_masked(
         preds["logI1"], preds["logvar1"], targets["logI1"], mask,
         logvar_min=logvar_min, logvar_max=logvar_max, use_logvar=use_logvar,
     )
-    nll2 = gaussian_nll_masked(
-        preds["logI2"], preds["logvar2"], targets["logI2"], mask,
-        logvar_min=logvar_min, logvar_max=logvar_max, use_logvar=use_logvar,
-    )
+
+    if "delta" in preds:
+        # delta head: second term supervises the per-spot log-ratio directly.
+        if "delta" not in targets:
+            raise KeyError(
+                "delta head emitted 'delta' but targets lack a 'delta' key; "
+                "training.targets.build_targets must provide it (delta = logI2 - logI1). "
+                "See docs/intensity_head_fix_proposal.md.")
+        nll2 = gaussian_nll_masked(
+            preds["delta"], preds["logvar_delta"], targets["delta"], mask,
+            logvar_min=logvar_min, logvar_max=logvar_max, use_logvar=use_logvar,
+        )
+    else:
+        nll2 = gaussian_nll_masked(
+            preds["logI2"], preds["logvar2"], targets["logI2"], mask,
+            logvar_min=logvar_min, logvar_max=logvar_max, use_logvar=use_logvar,
+        )
     return {"intensity1": nll1, "intensity2": nll2}

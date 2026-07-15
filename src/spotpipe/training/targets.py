@@ -1,8 +1,8 @@
 """Target-map construction: ground-truth spot rows -> dense training targets.
 
-Ported UNCHANGED from the old repo (``spotpipe.training.targets``); this is the
-boundary where dense / incorrect supervision could creep in, so the rules are
-explicit and narrow (see CLAUDE.md).
+Ported from the old repo (``spotpipe.training.targets``); this is the boundary
+where dense / incorrect supervision could creep in, so the rules are explicit and
+narrow (see CLAUDE.md).
 
 For each ground-truth spot at sub-pixel ``(x, y)`` (``x`` = column, ``y`` = row;
 the image is indexed ``[row, col]`` throughout, matching the simulator's PSF):
@@ -28,6 +28,13 @@ Returned target dict (per image, channel-first tensors):
   ``offset``      [2, H, W]  (frac_x, frac_y) at centres, else 0.0
   ``logI1``       [1, H, W]  true log-intensity ch1 at centres, else 0.0
   ``logI2``       [1, H, W]  true log-intensity ch2 at centres, else 0.0
+  ``delta``       [1, H, W]  true log-RATIO (logI2 - logI1) at centres, else 0.0
+
+``delta`` is ALWAYS provided (it is cheap and harmless): the independent-head loss
+never reads it, and the delta-head loss (``head_parameterisation: delta``)
+supervises it in place of ``logI2``. It is a PER-SPOT target -- the exact log-ratio
+of that one spot, written only at its centre pixel -- NOT a cross-spot slope. See
+``losses/intensity.py`` and ``docs/intensity_head_fix_proposal.md`` Sec.4.
 """
 
 from __future__ import annotations
@@ -39,7 +46,7 @@ import torch
 
 __all__ = ["build_targets", "TARGET_KEYS"]
 
-TARGET_KEYS = ("heatmap", "center_mask", "offset", "logI1", "logI2")
+TARGET_KEYS = ("heatmap", "center_mask", "offset", "logI1", "logI2", "delta")
 
 
 def _draw_gaussian(heatmap: torch.Tensor, cx: int, cy: int, sigma: float, radius: int) -> None:
@@ -80,6 +87,7 @@ def build_targets(
     offset = torch.zeros(2, h, w, dtype=torch.float32)
     logI1 = torch.zeros(1, h, w, dtype=torch.float32)
     logI2 = torch.zeros(1, h, w, dtype=torch.float32)
+    delta = torch.zeros(1, h, w, dtype=torch.float32)
 
     if len(spots) == 0:
         return {
@@ -88,6 +96,7 @@ def build_targets(
             "offset": offset,
             "logI1": logI1,
             "logI2": logI2,
+            "delta": delta,
         }
 
     radius = max(int(math.ceil(3.0 * heatmap_sigma)), 1)
@@ -107,6 +116,7 @@ def build_targets(
         offset[1, cy, cx] = y - math.floor(y)   # frac_y in [0, 1)
         logI1[0, cy, cx] = float(l1)            # last-spot-wins on collision
         logI2[0, cy, cx] = float(l2)
+        delta[0, cy, cx] = float(l2) - float(l1)  # per-spot log-ratio, last-spot-wins
 
     return {
         "heatmap": heatmap,
@@ -114,4 +124,5 @@ def build_targets(
         "offset": offset,
         "logI1": logI1,
         "logI2": logI2,
+        "delta": delta,
     }

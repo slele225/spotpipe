@@ -26,27 +26,37 @@ import types
 
 
 class _Permissive(types.ModuleType):
-    """A module whose every unknown attribute is a harmless callable/base class."""
+    """A module whose every unknown attribute is a harmless callable no-op.
+
+    Returns a callable INSTANCE (not the _Any class) so that e.g. ``nn.init.constant_(...)``
+    and ``torch.logaddexp(a, b)`` run as no-ops rather than raising. This lets STRUCTURAL
+    control flow execute (which dict keys a forward() returns, which branch a loss takes);
+    the returned values are meaningless placeholders -- numerical correctness is NOT tested
+    by the stub and must be covered by a real-torch test.
+    """
 
     def __getattr__(self, name: str):
         if name.startswith("__"):
             raise AttributeError(name)
-        return _Any
+        return _Any()
 
 
 class _Any:
-    """Doubles as a base class (nn.Module), a decorator (@torch.no_grad()), a dtype..."""
+    """Doubles as a base class (nn.Module), a decorator (@torch.no_grad()), a value, ...
+
+    Supports arithmetic and indexing so tensor-shaped control flow (``logI1 + delta``,
+    ``intensity[:, 0:1]``) runs. The RESULT is a fresh _Any -- a placeholder with no
+    numerical meaning. Never assert on _Any values; only on structure (keys, branches).
+    """
 
     def __init__(self, *a, **k):
         pass
 
     def __call__(self, *a, **k):
-        # @torch.no_grad() -> called with no args, must return a decorator
+        # @torch.no_grad() -> called with a single callable, must return it (decorator)
         if len(a) == 1 and not k and callable(a[0]):
             return a[0]
-        if not a and not k:
-            return _Any()
-        raise NotImplementedError("torch is stubbed here: no model may be run")
+        return _Any()
 
     def __enter__(self):
         return self
@@ -55,7 +65,18 @@ class _Any:
         return False
 
     def __getattr__(self, name):
-        return _Any
+        return _Any()
+
+    # --- structural-only arithmetic / indexing (values are meaningless) ---
+    def __getitem__(self, k):
+        return _Any()
+
+    def _bin(self, other):
+        return _Any()
+
+    __add__ = __radd__ = __sub__ = __rsub__ = _bin
+    __mul__ = __rmul__ = __truediv__ = __rtruediv__ = _bin
+    __neg__ = lambda self: _Any()  # noqa: E731
 
 
 def install() -> bool:
