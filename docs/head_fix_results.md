@@ -2,7 +2,30 @@
 
 The intensity-head investigation is closed. **The `(logI1, Δ)` reparameterisation wins and is
 the v3 headline model (`headfix40k-DELTA`).** This doc records the numbers and the reasoning so
-the decision is auditable. Raw data: `results/headfix40k/`.
+the decision is auditable. Raw data: `results/headfix40k/` and `results/eval_v3/`.
+
+## ✅ VALIDATED on the full v3 benchmark (the shared blind evaluator, not a probe)
+`spotpipe infer` (peak_threshold 0.3, retuned OFF-benchmark — see below) + `spotpipe evaluate`
+over all 55 conditions:
+
+* **α recovery across [−1.2, 1.2]: MAE ≈ 0.050**, matching the standalone probe (0.055) — the
+  benchmark and the probe agree.
+* **α=0 NULL control: +0.024 ± 0.002** — no meaningful manufactured curvature (~2% of the α range).
+* **Detection (family 1), recall by SNR** (density-averaged, so dragged down by the 0.02/0.025
+  crowding cells): 0.17 @ snr0.75 (13 ph, near the noise limit) → 0.47 → 0.74 → 0.80 → 0.84 →
+  0.87 @ snr3. Precision 0.87–0.99 throughout. Monotonic, no low-SNR pathology.
+* **vs baselines:** old-repo α-MAE was 1.0–2.8 (oracle 1.9). This is a **20–50× improvement**.
+
+**Threshold retune outcome:** `scripts/threshold_retune.py` (off-benchmark, training-dist val,
+max-F1) CONFIRMED peak_threshold **0.3** — the shipped value. The handoff's "raise to 0.7" was
+based on one *sparse benchmark cell* (test-set tuning) and would sacrifice the crowding-recall
+advantage that is the whole thesis. F1 is flat 0.2–0.4 and falls above; recall is the binding
+constraint on the training distribution, so 0.3 is correct.
+
+**Caveats before this is the FULL headline:** (1) the `--oracle` scored here is the trivial
+GT-passthrough (perfect by construction), NOT the informative GT-center+shared-extraction oracle —
+that comparison is still to build; (2) the real baselines (cmeAnalysis/SpotMAX/Spotiflow) have not
+run on the v3 grid; the crowding win needs the snr×density-stratified head-to-head.
 
 ## The chain that got here (each probe killed a hypothesis cheaply)
 1. `coverage_probe_findings.md` — the "bright+dense is structurally unreachable" hypothesis is
